@@ -536,12 +536,14 @@ def set_app_domain(app_id: str, domain: str) -> None:
     _write_json(path, apps)
 
 
-def set_app_github(app_id: str, repo_url: str) -> None:
+def set_app_github(app_id: str, repo_url: str, pages_url: str = "") -> None:
     path = os.path.join(_user_dir("apps"), "apps.json")
     apps = _read_json(path, [])
     for a in apps:
         if a["id"] == app_id:
             a["github_url"] = repo_url
+            if pages_url:
+                a["github_pages_url"] = pages_url
     _write_json(path, apps)
 
 
@@ -1495,15 +1497,16 @@ def build_html_diff(a: str, b: str, a_name: str, b_name: str) -> str:
 
 
 def push_to_github(token: str, repo_name: str, files: dict,
-                   private: bool = True) -> tuple[bool, str]:
-    """Create the repo if needed and commit files. Returns (ok, repo_url_or_error)."""
+                   private: bool = True, enable_pages: bool = False) -> tuple[bool, str, str]:
+    """Create the repo if needed, commit files, optionally enable Pages.
+    Returns (ok, repo_url_or_error, pages_url)."""
     api = "https://api.github.com"
     headers = {"Authorization": f"Bearer {token}",
                "Accept": "application/vnd.github+json"}
     try:
         me = requests.get(f"{api}/user", headers=headers, timeout=30)
         if me.status_code != 200:
-            return False, f"Auth failed {me.status_code}: check your token scope (needs 'repo')."
+            return False, "Auth failed: check your token scope (needs 'repo').", ""
         owner = me.json()["login"]
 
         repo = requests.get(f"{api}/repos/{owner}/{repo_name}", headers=headers, timeout=30)
@@ -1514,13 +1517,13 @@ def push_to_github(token: str, repo_name: str, files: dict,
                                     "description": "Built with Jarvis Personal OS"},
                               timeout=30)
             if c.status_code not in (200, 201):
-                return False, f"Repo create failed {c.status_code}: {c.text[:200]}"
+                return False, f"Repo create failed {c.status_code}: {c.text[:200]}", ""
             repo_url = c.json()["html_url"]
             time.sleep(2)  # let auto_init finish so the default branch exists
         elif repo.status_code == 200:
             repo_url = repo.json()["html_url"]
         else:
-            return False, f"Repo lookup failed {repo.status_code}: {repo.text[:200]}"
+            return False, f"Repo lookup failed {repo.status_code}: {repo.text[:200]}", ""
 
         for path, content in files.items():
             existing = requests.get(f"{api}/repos/{owner}/{repo_name}/contents/{path}",
@@ -1532,10 +1535,24 @@ def push_to_github(token: str, repo_name: str, files: dict,
             put = requests.put(f"{api}/repos/{owner}/{repo_name}/contents/{path}",
                                headers=headers, json=payload, timeout=30)
             if put.status_code not in (200, 201):
-                return False, f"Commit of {path} failed {put.status_code}: {put.text[:200]}"
-        return True, repo_url
+                return False, f"Commit of {path} failed {put.status_code}: {put.text[:200]}", ""
+
+        pages_url = ""
+        if enable_pages:
+            p = requests.post(f"{api}/repos/{owner}/{repo_name}/pages", headers=headers,
+                              json={"source": {"branch": "main", "path": "/"}}, timeout=30)
+            if p.status_code in (200, 201):
+                pages_url = p.json().get("html_url", "")
+            elif p.status_code == 409:  # already enabled
+                g = requests.get(f"{api}/repos/{owner}/{repo_name}/pages",
+                                 headers=headers, timeout=30)
+                if g.status_code == 200:
+                    pages_url = g.json().get("html_url", "")
+            if not pages_url:
+                pages_url = f"https://{owner}.github.io/{repo_name}/"
+        return True, repo_url, pages_url
     except requests.exceptions.RequestException as exc:
-        return False, str(exc)
+        return False, str(exc), ""
 
 
 def deploy_to_vercel(token: str, html: str, idea: str,
@@ -1830,8 +1847,18 @@ def workspace_project() -> None:
                 repo_name = st.text_input("Repository name", value=default_repo,
                                           key="github-repo")
                 private = st.checkbox("Private repository", value=True, key="github-private")
+                has_proj = bool(st.session_state.get("proj_files"))
+                push_full = st.checkbox("Push full production project (all files)",
+                                        value=has_proj, key="github-full",
+                                        help="Otherwise only the single-file index.html is pushed.")
+                enable_pages = st.checkbox("Enable GitHub Pages (free live URL)",
+                                           value=not private, key="github-pages",
+                                           help="Serves index.html at a public github.io URL. "
+                                                "Free for public repos.")
                 if existing.get("github_url"):
                     st.success(f"Repo: {existing['github_url']}")
+                if existing.get("github_pages_url"):
+                    st.success(f"🌐 Pages: {existing['github_pages_url']}")
                 if st.button("🐙 Push to GitHub", key="github-push", disabled=is_viewer):
                     if not gtoken.strip():
                         st.warning("Paste your GitHub token first.", icon="⚠️")
@@ -1841,15 +1868,26 @@ def workspace_project() -> None:
                         files = {"index.html": st.session_state["live_app_html"],
                                  "README.md": f"# {idea}\n\nBuilt with Jarvis Personal OS.\n"}
                         files.update(deploy_configs(idea))
+                        if push_full and has_proj:
+                            for f in st.session_state["proj_files"]:
+                                files[f["path"]] = f["code"]
+                            if st.session_state.get("proj_plan"):
+                                files["PLAN.md"] = st.session_state["proj_plan"]
                         with st.spinner("Pushing to GitHub…"):
-                            ok, res = push_to_github(gtoken.strip(), repo_name.strip(),
-                                                     files, private)
+                            ok, res, pages = push_to_github(
+                                gtoken.strip(), repo_name.strip(), files, private,
+                                enable_pages=enable_pages)
                         if ok:
                             if active_id:
-                                set_app_github(active_id, res)
+                                set_app_github(active_id, res, pages)
                                 add_deploy_record(active_id, "GitHub", res)
-                            st.success("🎉 Pushed to GitHub!")
+                                if pages:
+                                    add_deploy_record(active_id, "GitHub Pages", pages)
+                            st.success(f"🎉 Pushed {len(files)} file(s) to GitHub!")
                             st.markdown(f"[Open your repo →]({res})")
+                            if pages:
+                                st.info(f"🌐 GitHub Pages is live (may take ~1 min): {pages}",
+                                        icon="🚀")
                             st.rerun()
                         else:
                             st.error(f"Push failed: {res}")
@@ -1972,6 +2010,8 @@ def workspace_project() -> None:
                     links.append(f"▲ [Vercel]({a['deployed_url_vercel']})")
                 if a.get("github_url"):
                     links.append(f"🐙 [GitHub]({a['github_url']})")
+                if a.get("github_pages_url"):
+                    links.append(f"🌐 [Pages]({a['github_pages_url']})")
                 deployed = ("  ·  " + "  ".join(links)) if links else ""
                 ac1, ac2, ac3 = st.columns([3, 1, 1])
                 ac1.markdown(f"**{display[:70]}**  \n_{a['time'][:16].replace('T',' ')} UTC_"
