@@ -19,6 +19,7 @@ Deploy:           point https://apnabihar.online at this app (see README.md)
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -57,9 +58,6 @@ PROVIDERS = {
 }
 
 POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{prompt}"
-
-# Directory for persisted per-user chat history (survives restarts).
-HISTORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".jarvis", "history")
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -341,33 +339,97 @@ def transcribe_audio(audio_bytes: bytes) -> str:
 
 
 # ----------------------------------------------------------------------------- #
-#  Persistent chat history  (per-user, file backed)
+#  Per-user persistent storage helpers
 # ----------------------------------------------------------------------------- #
 
-def _history_path() -> str:
+def _user_key() -> str:
     email = getattr(st.user, "email", "anon") or "anon"
-    key = hashlib.sha256(email.encode()).hexdigest()[:16]
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    return os.path.join(HISTORY_DIR, f"{key}.json")
+    return hashlib.sha256(email.encode()).hexdigest()[:16]
 
 
-def load_conversations() -> List[dict]:
-    path = _history_path()
+def _user_dir(sub: str) -> str:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".jarvis", sub, _user_key())
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _read_json(path: str, default):
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 return json.load(fh)
         except (ValueError, OSError):
-            return []
-    return []
+            return default
+    return default
+
+
+def _write_json(path: str, data) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+# ---- chat conversations ----
+def load_conversations() -> List[dict]:
+    return _read_json(os.path.join(_user_dir("history"), "conversations.json"), [])
 
 
 def save_conversations(conversations: List[dict]) -> None:
-    try:
-        with open(_history_path(), "w", encoding="utf-8") as fh:
-            json.dump(conversations, fh, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    _write_json(os.path.join(_user_dir("history"), "conversations.json"), conversations)
+
+
+# ---- email templates ----
+def load_templates() -> List[dict]:
+    return _read_json(os.path.join(_user_dir("templates"), "email.json"), [])
+
+
+def save_templates(templates: List[dict]) -> None:
+    _write_json(os.path.join(_user_dir("templates"), "email.json"), templates)
+
+
+# ---- image gallery (base64 stored in a single JSON data file) ----
+def save_image_to_gallery(image_bytes: bytes, prompt: str) -> None:
+    path = os.path.join(_user_dir("gallery"), "gallery.json")
+    meta = _read_json(path, [])
+    meta.insert(0, {
+        "b64": base64.b64encode(image_bytes).decode("ascii"),
+        "prompt": prompt,
+        "time": datetime.now(timezone.utc).isoformat(),
+    })
+    _write_json(path, meta[:40])
+
+
+def load_gallery() -> List[dict]:
+    items = []
+    for m in _read_json(os.path.join(_user_dir("gallery"), "gallery.json"), []):
+        try:
+            items.append({**m, "bytes": base64.b64decode(m["b64"])})
+        except (KeyError, ValueError):
+            continue
+    return items
+
+
+# ----------------------------------------------------------------------------- #
+#  Text-to-speech  (free, in-browser SpeechSynthesis)
+# ----------------------------------------------------------------------------- #
+
+def speak(text: str) -> None:
+    import streamlit.components.v1 as components
+    payload = json.dumps(text[:3000])
+    components.html(
+        f"""
+        <script>
+            const u = new SpeechSynthesisUtterance({payload});
+            u.rate = 1.02; u.pitch = 1.0;
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(u);
+        </script>
+        """,
+        height=0,
+    )
 
 
 # ----------------------------------------------------------------------------- #
@@ -464,6 +526,11 @@ def render_sidebar() -> None:
             help="Pollinations AI is free and needs no key.",
         )
         st.caption("Powered by Pollinations AI · free & unlimited")
+
+        st.divider()
+        st.markdown("### 🔊 Voice")
+        st.checkbox("Read replies aloud", key="read_aloud",
+                    help="Jarvis speaks its chat answers using your browser's voice.")
 
         st.divider()
         status = "🟢 Online" if st.session_state.get("llm_key") else "🔴 Add key"
@@ -584,8 +651,14 @@ def workspace_chat() -> None:
             reply = st.write_stream(llm_stream(history))
         active["messages"].append({"role": "assistant", "content": reply})
         save_conversations(st.session_state.conversations)
+        if st.session_state.get("read_aloud"):
+            speak(reply)
         if voice_text:
             st.rerun()
+
+    if active["messages"] and active["messages"][-1]["role"] == "assistant":
+        if st.button("🔊 Read last answer", key="read-last"):
+            speak(active["messages"][-1]["content"])
 
 
 # ----------------------------------------------------------------------------- #
@@ -596,6 +669,25 @@ def workspace_email() -> None:
     st.subheader("✉️ Email Generator")
     st.caption("Generate a perfectly formatted email draft in seconds.")
 
+    if "email_templates" not in st.session_state:
+        st.session_state.email_templates = load_templates()
+
+    # ---- saved templates (one-tap reuse) ----
+    if st.session_state.email_templates:
+        st.markdown("**⭐ Saved templates**")
+        tcols = st.columns(min(4, len(st.session_state.email_templates)) or 1)
+        for idx, tpl in enumerate(st.session_state.email_templates):
+            col = tcols[idx % len(tcols)]
+            if col.button(f"⭐ {tpl['name']}", key=f"tpl-use-{idx}", use_container_width=True):
+                st.session_state["email-recipient"] = tpl["recipient"]
+                st.session_state["email-tone"] = tpl["tone"]
+                st.session_state["email-context"] = tpl["context"]
+                st.rerun()
+            if col.button("🗑️", key=f"tpl-del-{idx}", use_container_width=True):
+                st.session_state.email_templates.pop(idx)
+                save_templates(st.session_state.email_templates)
+                st.rerun()
+
     c1, c2 = st.columns(2)
     recipient = c1.text_input("Recipient", placeholder="e.g. Hiring Manager, Acme Corp",
                               key="email-recipient")
@@ -605,7 +697,8 @@ def workspace_email() -> None:
                            placeholder="What is this email about? What do you want to achieve?",
                            height=140, key="email-context")
 
-    if st.button("✨ Generate Email", key="email-generate"):
+    b1, b2 = st.columns([1, 1])
+    if b1.button("✨ Generate Email", key="email-generate", use_container_width=True):
         if not context.strip():
             st.warning("Please describe the context/goal of the email.", icon="⚠️")
         else:
@@ -619,6 +712,21 @@ def workspace_email() -> None:
                                 f"Goal/context: {context}"},
                 ]
                 st.session_state["email_result"] = llm_chat(msgs, temperature=0.6)
+
+    with b2.popover("⭐ Save as template", use_container_width=True):
+        tpl_name = st.text_input("Template name", key="tpl-name",
+                                 placeholder="e.g. Job follow-up")
+        if st.button("Save", key="tpl-save"):
+            if tpl_name.strip() and context.strip():
+                st.session_state.email_templates.insert(0, {
+                    "name": tpl_name.strip(), "recipient": recipient,
+                    "tone": tone, "context": context,
+                })
+                save_templates(st.session_state.email_templates)
+                st.success("Template saved!")
+                st.rerun()
+            else:
+                st.warning("Give it a name and fill the context first.")
 
     if st.session_state.get("email_result"):
         st.markdown("#### 📋 Draft")
@@ -720,6 +828,7 @@ def workspace_image() -> None:
                 resp.raise_for_status()
                 st.session_state["img_bytes"] = resp.content
                 st.session_state["img_caption"] = prompt.strip()
+                save_image_to_gallery(resp.content, prompt.strip())
             except requests.exceptions.RequestException as exc:
                 st.error(f"Image generation failed: {exc}")
                 return
@@ -731,6 +840,20 @@ def workspace_image() -> None:
         st.download_button("⬇️ Download image", data=st.session_state["img_bytes"],
                            file_name="jarvis-image.png", mime="image/png",
                            key="img-download")
+
+    # ---- saved gallery ----
+    gallery = load_gallery()
+    if gallery:
+        st.divider()
+        st.markdown(f"#### 🖼️ Your Gallery ({len(gallery)})")
+        cols = st.columns(3)
+        for idx, item in enumerate(gallery):
+            with cols[idx % 3]:
+                st.image(item["bytes"], caption=item.get("prompt", "")[:60],
+                         use_container_width=True)
+                st.download_button("⬇️", data=item["bytes"],
+                                   file_name=f"jarvis-{idx}.png", mime="image/png",
+                                   key=f"gal-dl-{idx}")
 
 
 # ----------------------------------------------------------------------------- #
@@ -777,12 +900,16 @@ def workspace_project() -> None:
         with st.status("👨‍💻 Coder agent writing the files…", expanded=False) as status:
             code_raw = llm_chat([
                 {"role": "system",
-                 "content": "You are an expert engineer. Implement the plan. Output EACH file "
-                            "STRICTLY in this format and nothing else:\n"
+                 "content": "You are an expert engineer. Implement the plan as a COMPLETE, "
+                            "RUNNABLE project folder. You MUST include:\n"
+                            "  - all source files\n"
+                            "  - a dependency manifest (requirements.txt / package.json)\n"
+                            "  - a README.md with an Overview, Setup steps, and Run commands\n"
+                            "Output EACH file STRICTLY in this format and nothing else:\n"
                             "=== relative/path/file.ext ===\n```lang\n<code>\n```\n"
                             "Repeat for every file. No prose outside the blocks."},
                 {"role": "user", "content": f"Idea: {idea}\n\nPlan:\n{plan}"},
-            ], temperature=0.3, max_tokens=3000)
+            ], temperature=0.3, max_tokens=3500)
             status.update(label="✅ Coder finished", state="complete")
         st.session_state["proj_files"] = _parse_files(code_raw)
         st.session_state["proj_raw"] = code_raw
@@ -800,6 +927,12 @@ def workspace_project() -> None:
         head[1].download_button("⬇️ Download ZIP", data=buf.getvalue(),
                                 file_name="jarvis-project.zip", mime="application/zip",
                                 use_container_width=True, key="proj-zip")
+
+        readme = next((f for f in files if f["path"].lower().endswith("readme.md")), None)
+        if readme:
+            with st.expander("📖 Setup & Run instructions", expanded=True):
+                st.markdown(readme["code"])
+
         for f in files:
             with st.expander(f"📄 {f['path']}"):
                 lang = f["path"].split(".")[-1] if "." in f["path"] else "text"
