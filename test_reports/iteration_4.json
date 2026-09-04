@@ -1,0 +1,53 @@
+{
+  "summary": "Backend-only verification of the new Jarvis admin console + access control (41 pytest cases, 41 passed, run against the public preview URL https://jarvis-os-52.preview.emergentagent.com). Rewrote the whole suite for the new auth model: sessions are seeded directly in Mongo (db.users + db.user_sessions) and passed as 'Authorization: Bearer <token>' (cookie auth also verified). Covered: (1) all 11 protected endpoints return 401 unauthenticated, plus 401 for a bogus bearer token ('Invalid session') and an expired session ('Session expired'), and 400 for /api/auth/session without X-Session-ID (external Google session API never called); (2) super-admin session -> GET /api/auth/me returns role='super_admin', is_admin=true, no _id leakage; (3) allow-list management as super admin: POST adds+lowercases the email (200), GET lists with the super admin always first and super_admin field set, re-POST upserts (no duplicate, role updated), DELETE removes and GET verifies removal, DELETE/POST on the super admin email -> 400, invalid email -> 400, missing email -> 422; (4) regular allow-listed user (role 'user') gets 403 'Super admin only.' on GET/POST/DELETE /api/admin/users and no DB writes/deletes occur; (5) GET /api/stats returns integer chat_messages/emails/apps + recent_apps[] scoped per user (fresh user sees all zeros, counters increment after a build, recent_apps capped at 5, no _id); (6) core endpoints authenticated: POST /api/chat returns a real LLM reply and persists both messages to db.chats (GET /api/history/chat matches), DELETE /api/history/chat clears, POST /api/email returns a draft with a subject and appears in /api/history/emails, POST /api/research returns a summary + live sources, POST /api/build returns a full HTML document persisted to db.apps, refine adds the requested reset button, DELETE /api/history/apps/{id} removes it. Validation errors (422/400) verified for chat/email/research. All seeded users, sessions, allow-list entries, chats, emails and apps were purged - Mongo collections are back to empty (verified).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/auth/me, /api/stats, /api/chat", "issue": "REVOCATION GAP (security): removing a user from the allow-list does not invalidate their existing session. After deleting the allowed_users doc, the same bearer token still returns 200 on /api/stats and /api/chat, and /api/auth/me returns 200 with role='' / is_admin=false instead of 403. get_current_user() never calls _enforce_access(); the allow-list is only checked in /api/auth/session, so a revoked user keeps full access for up to 7 days. Suggested fix: call _enforce_access(user['email']) inside get_current_user (or a require_allowed dependency) so revocation is immediate."},
+      {"endpoint": "POST /api/admin/users", "issue": "The 'role' field is a free-form string with no validation - the super admin can create an entry with role='super_admin' (or any typo like 'usr'). Because _role_for() returns the allow-list role verbatim and require_super_admin() accepts role=='super_admin', that user gets full super-admin powers (can add/remove other users). Restrict role to a Literal['user','super_admin'] (or just 'user') via Pydantic."},
+      {"endpoint": "POST /api/auth/logout", "issue": "Only reads the session_token cookie; a bearer-token session cannot be logged out (returns {ok:true} while the session doc stays in db.user_sessions). Mirror the token lookup used by get_current_user()."},
+      {"endpoint": "POST /api/auth/session", "issue": "Uses blocking `requests.get()` inside an async route, which blocks the event loop for up to 20s per login. Use httpx.AsyncClient. Also inserts a new db.user_sessions doc on every login with no dedupe/TTL index, so expired sessions accumulate forever."},
+      {"endpoint": "/api/research", "issue": "Pre-existing: a DuckDuckGo outage is swallowed and returned as HTTP 200 with a 'No live web results' summary; clients cannot distinguish an outage from an empty result set."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_auth_access.py",
+    "/app/backend/tests/test_admin.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_revocation_probe.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Enforce the allow-list on every authenticated request (call _enforce_access in get_current_user) so removing a user takes effect immediately instead of after session expiry.",
+    "Validate the 'role' field on POST /api/admin/users (Literal enum) to prevent accidental/self-inflicted super-admin escalation via the allow-list.",
+    "Make /api/auth/logout honour the Authorization: Bearer token, not just the cookie.",
+    "Replace blocking requests.get in /api/auth/session with an async HTTP client and add a TTL index on db.user_sessions.expires_at."
+  ],
+  "critical_code_review_comments": [
+    "SUPER_ADMIN is hard-coded in server.py (line 24). Move it to an env var (e.g. SUPER_ADMIN_EMAIL) so the owner can change without a code deploy; the value is also duplicated in the API response payload.",
+    "require_super_admin() trusts db.users.role, which is only refreshed at /api/auth/session time; combined with the unvalidated allow-list role this is the escalation path noted above.",
+    "get_current_user() re-queries db.user_sessions + db.users on every request with no index - add indexes on user_sessions.session_token and users.user_id.",
+    "server.py is 408 lines and mixes auth, admin, LLM helpers and 4 feature domains; consider splitting into routers (auth.py, admin.py, ai.py) before it grows past 700 lines.",
+    "No route validates that the email in DELETE /api/admin/users/{email} exists - deleting a non-existent email returns {ok:true} (200) instead of 404; harmless but misleading for the UI."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_auth_access.py",
+    "/app/backend/tests/test_admin.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_revocation_probe.py"
+  ],
+  "success_rate": {"backend": "100% (41/41 pytest cases)", "frontend": "not tested (explicitly out of scope)"},
+  "seed_data_creation": "Seeded per-test-class Mongo docs: a super-admin user/session for gauravklegacy@gmail.com, allow-listed regular users test_regular_*@test.com, plus transient allow-list entries test_add_*/test_upsert_*/test_forbidden_*@test.com. All removed by fixture teardown - db.users, db.user_sessions, db.allowed_users, db.chats, db.emails and db.apps verified empty after the run.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "/app/memory/test_credentials.md is STALE - it describes an old OWNER-LOCK model (db.app_settings key='owner', ALLOWED_EMAILS env var) that no longer exists in server.py (now SUPER_ADMIN constant + db.allowed_users). Please update it. No real Google credentials are needed; auth for tests is done by seeding db.users + db.user_sessions (see /app/backend/tests/conftest.py::_seed).",
+  "context_for_next_testing_agent": "Auth for backend tests = seed Mongo (conftest.py fixtures `super_admin` and `regular_user`) and send Authorization: Bearer <token>; both fixtures purge their data on teardown. Never call the external emergent session API. Suite layout: test_auth_access.py (401/403 + /auth/me), test_admin.py (allow-list CRUD + role enforcement), backend_test.py (chat/email/research/build/stats with persistence assertions), test_revocation_probe.py (documents the allow-list revocation gap - it prints observed status codes and always passes; convert it to an assertion of 403 once the fix lands). Run: cd /app/backend && python -m pytest tests/ -q (pytest.ini forces -n 2 --dist loadscope; LLM/build tests need ~30s). Frontend UI was intentionally not tested.",
+  "rca_of_the_issue": "Revocation gap RCA: the allow-list is only consulted in POST /api/auth/session (via _enforce_access) at login time. get_current_user() validates only session_token existence/expiry and the users doc, so once a session exists the allow-list is never re-checked. Reproduction: seed a user + session, confirm 200 on /api/stats, delete their db.allowed_users doc, and /api/stats + /api/chat still return 200 while /api/auth/me returns role=''. Mitigation: add the allow-list check to get_current_user (or delete the user's sessions inside DELETE /api/admin/users/{email})."
+}

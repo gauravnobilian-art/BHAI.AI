@@ -154,5 +154,29 @@ body {
   flex-direction: column; text-align: center; padding: 2rem; position: relative; z-index: 1;
 }
 
+.jv-boot {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  flex-direction: column; text-align: center; position: relative; z-index: 2;
+}
+.jv-boot-arc { width: 110px !important; height: 110px !important; animation: jv-bootpulse 1s ease-in-out infinite; }
+@keyframes jv-bootpulse {
+  0% { box-shadow: 0 0 20px rgba(79,216,255,.5), inset 0 0 8px rgba(255,255,255,.5); transform: scale(.9); }
+  50% { box-shadow: 0 0 60px rgba(79,216,255,1), inset 0 0 18px rgba(255,255,255,.9); transform: scale(1.05); }
+  100% { box-shadow: 0 0 20px rgba(79,216,255,.5), inset 0 0 8px rgba(255,255,255,.5); transform: scale(.9); }
+}
+.jv-boot-title { animation: jv-fadein 1.2s ease .3s both; }
+.jv-boot-sub { animation: jv-fadein 1s ease .8s both; }
+@keyframes jv-fadein { from { opacity: 0; letter-spacing: .5em; } to { opacity: 1; } }
+
+.jv-hud-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .8rem; }
+@media (max-width: 640px) { .jv-hud-grid { grid-template-columns: 1fr; } }
+
+.jv-quick {
+  display: flex; align-items: center; gap: .6rem; padding: 1rem 1.1rem; cursor: pointer;
+  color: var(--text); font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 1rem;
+  text-align: left; transition: all .15s ease;
+}
+.jv-quick:hover { border-color: var(--arc); box-shadow: 0 0 18px rgba(79,216,255,.2); transform: translateY(-2px); color: var(--arc); }
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #2a2118; border-radius: 8px; }

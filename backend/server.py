@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Literal
 import os
 import uuid
 import logging
@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
 
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
-ALLOWED_EMAILS = [e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()]
+SUPER_ADMIN = "gauravklegacy@gmail.com"
 SESSION_API = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
@@ -77,20 +77,31 @@ async def get_current_user(request: Request) -> dict:
     user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # enforce allow-list on every request so revocation is immediate
+    await _enforce_access(user["email"])
     return user
 
 
-async def _enforce_owner(email: str) -> None:
-    """Only the owner (first login, or an ALLOWED_EMAILS entry) may access."""
-    if ALLOWED_EMAILS:
-        if email.lower() not in ALLOWED_EMAILS:
-            raise HTTPException(status_code=403, detail="Access restricted to the owner.")
-        return
-    owner = await db.app_settings.find_one({"key": "owner"})
-    if owner is None:
-        await db.app_settings.insert_one({"key": "owner", "email": email})
-    elif owner["email"].lower() != email.lower():
-        raise HTTPException(status_code=403, detail="Access restricted to the owner.")
+async def _role_for(email: str) -> str:
+    if email.lower() == SUPER_ADMIN.lower():
+        return "super_admin"
+    doc = await db.allowed_users.find_one({"email": email.lower()}, {"_id": 0})
+    return doc["role"] if doc else ""
+
+
+async def _enforce_access(email: str) -> str:
+    """Only the super admin or explicitly allowed users may access. Returns role."""
+    role = await _role_for(email)
+    if not role:
+        raise HTTPException(status_code=403, detail="Access restricted. Ask the admin for access.")
+    return role
+
+
+async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
+    if (user.get("email", "").lower() != SUPER_ADMIN.lower()
+            and user.get("role") != "super_admin"):
+        raise HTTPException(status_code=403, detail="Super admin only.")
+    return user
 
 
 @api_router.post("/auth/session")
@@ -106,19 +117,20 @@ async def auth_session(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Invalid session id")
     data = r.json()
     email = data["email"]
-    await _enforce_owner(email)
+    role = await _enforce_access(email)
 
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
         user_id = existing["user_id"]
         await db.users.update_one({"user_id": user_id},
                                   {"$set": {"name": data.get("name", ""),
-                                            "picture": data.get("picture", "")}})
+                                            "picture": data.get("picture", ""), "role": role}})
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         await db.users.insert_one({
             "user_id": user_id, "email": email, "name": data.get("name", ""),
-            "picture": data.get("picture", ""), "created_at": datetime.now(timezone.utc)})
+            "picture": data.get("picture", ""), "role": role,
+            "created_at": datetime.now(timezone.utc)})
 
     session_token = data["session_token"]
     await db.user_sessions.insert_one({
@@ -129,18 +141,24 @@ async def auth_session(request: Request, response: Response):
     response.set_cookie("session_token", session_token, httponly=True, secure=True,
                         samesite="none", path="/", max_age=7 * 24 * 3600)
     return {"user_id": user_id, "email": email, "name": data.get("name", ""),
-            "picture": data.get("picture", "")}
+            "picture": data.get("picture", ""), "role": role}
 
 
 @api_router.get("/auth/me")
 async def auth_me(user: dict = Depends(get_current_user)):
+    role = await _role_for(user["email"])
     return {"user_id": user["user_id"], "email": user["email"],
-            "name": user.get("name", ""), "picture": user.get("picture", "")}
+            "name": user.get("name", ""), "picture": user.get("picture", ""),
+            "role": role, "is_admin": role == "super_admin"}
 
 
 @api_router.post("/auth/logout")
 async def auth_logout(request: Request, response: Response):
     token = request.cookies.get("session_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
     if token:
         await db.user_sessions.delete_many({"session_token": token})
     response.delete_cookie("session_token", path="/")
@@ -329,6 +347,59 @@ async def get_apps(user: dict = Depends(get_current_user)):
 async def delete_app(app_id: str, user: dict = Depends(get_current_user)):
     await db.apps.delete_many({"user_id": user["user_id"], "id": app_id})
     return {"ok": True}
+
+
+class AllowedUser(BaseModel):
+    email: str
+    role: Literal["user", "admin"] = "user"
+
+
+@api_router.get("/admin/users")
+async def admin_list(_: dict = Depends(require_super_admin)):
+    docs = await db.allowed_users.find({}, {"_id": 0}).sort("added_at", -1).to_list(200)
+    for d in docs:
+        d["added_at"] = str(d.get("added_at", ""))
+    users = [{"email": SUPER_ADMIN, "role": "super_admin", "added_at": ""}] + \
+            [d for d in docs if d["email"].lower() != SUPER_ADMIN.lower()]
+    return {"users": users, "super_admin": SUPER_ADMIN}
+
+
+@api_router.post("/admin/users")
+async def admin_add(body: AllowedUser, _: dict = Depends(require_super_admin)):
+    email = body.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required.")
+    if email == SUPER_ADMIN.lower():
+        raise HTTPException(status_code=400, detail="That is already the super admin.")
+    await db.allowed_users.update_one(
+        {"email": email},
+        {"$set": {"email": email, "role": body.role or "user",
+                  "added_at": datetime.now(timezone.utc)}}, upsert=True)
+    return {"ok": True}
+
+
+@api_router.delete("/admin/users/{email}")
+async def admin_remove(email: str, _: dict = Depends(require_super_admin)):
+    if email.strip().lower() == SUPER_ADMIN.lower():
+        raise HTTPException(status_code=400, detail="Cannot remove the super admin.")
+    em = email.strip().lower()
+    await db.allowed_users.delete_many({"email": em})
+    # immediate revocation: kill the user's active sessions
+    user = await db.users.find_one({"email": em}, {"_id": 0})
+    if user:
+        await db.user_sessions.delete_many({"user_id": user["user_id"]})
+    return {"ok": True}
+
+
+@api_router.get("/stats")
+async def stats(user: dict = Depends(get_current_user)):
+    chat = await db.chats.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    chat_count = len(chat.get("messages", [])) if chat else 0
+    emails = await db.emails.count_documents({"user_id": user["user_id"]})
+    apps = await db.apps.count_documents({"user_id": user["user_id"]})
+    recent = await db.apps.find({"user_id": user["user_id"]}, {"_id": 0, "id": 1, "idea": 1}) \
+        .sort("created_at", -1).to_list(5)
+    return {"chat_messages": chat_count, "emails": emails, "apps": apps, "recent_apps": recent}
 
 
 app.include_router(api_router)

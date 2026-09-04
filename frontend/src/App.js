@@ -4,6 +4,7 @@ import axios from "axios";
 import {
   MessageSquare, Mail, Search, Image as ImageIcon, Rocket,
   Send, Download, Copy, Check, Sparkles, Wand2, Mic, Volume2, VolumeX, LogOut, Trash2,
+  LayoutDashboard, Shield, Radio, Zap, Plus,
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -19,6 +20,33 @@ const TABS = [
 
 function Spinner() { return <span className="jv-spin" />; }
 
+function playBootSound() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = "sine";
+    o.frequency.setValueAtTime(90, ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(520, ctx.currentTime + 1.1);
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.5);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.6);
+    o.start(); o.stop(ctx.currentTime + 1.7);
+  } catch { /* noop */ }
+}
+
+function BootScreen() {
+  return (
+    <div className="jv-boot">
+      <span className="jv-arc jv-boot-arc" />
+      <div className="jv-hero jv-boot-title" style={{ fontSize: "2.6rem", marginTop: "1.4rem" }}>JARVIS</div>
+      <p className="jv-muted jv-mono jv-boot-sub" style={{ marginTop: ".6rem" }}>INITIALIZING ARC REACTOR…</p>
+    </div>
+  );
+}
+
 function speak(text) {
   try {
     const u = new SpeechSynthesisUtterance(String(text).slice(0, 3000));
@@ -29,7 +57,7 @@ function speak(text) {
 }
 
 /* ------------------------------- Chat ------------------------------- */
-function ChatTab({ readAloud }) {
+function ChatTab({ readAloud, wakeSignal }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [style, setStyle] = useState("");
@@ -70,6 +98,9 @@ function ChatTab({ readAloud }) {
   };
 
   const clear = async () => { await http.delete("/history/chat").catch(() => {}); setMessages([]); };
+
+  useEffect(() => { if (wakeSignal) { mic(); } // eslint-disable-next-line
+  }, [wakeSignal]);
 
   const presets = [
     { k: "professional", label: "Professional" },
@@ -300,6 +331,109 @@ function BuildTab() {
   );
 }
 
+/* ------------------------------- HUD ------------------------------- */
+function HudTab({ user, go }) {
+  const [stats, setStats] = useState({ chat_messages: 0, emails: 0, apps: 0, recent_apps: [] });
+  useEffect(() => { http.get("/stats").then(({ data }) => setStats(data)).catch(() => {}); }, []);
+  const cards = [
+    { label: "Chat Messages", value: stats.chat_messages, color: "var(--arc)" },
+    { label: "Emails Drafted", value: stats.emails, color: "var(--gold)" },
+    { label: "Apps Built", value: stats.apps, color: "var(--red-2)" },
+  ];
+  const actions = [
+    { id: "chat", label: "Talk to Jarvis", icon: MessageSquare },
+    { id: "research", label: "Web Research", icon: Search },
+    { id: "image", label: "Generate Image", icon: ImageIcon },
+    { id: "build", label: "Build an App", icon: Rocket },
+  ];
+  return (
+    <div data-testid="hud-tab">
+      <div className="jv-card" style={{ padding: "1.2rem 1.4rem", marginBottom: "1.2rem" }}>
+        <div className="jv-mono jv-muted" style={{ fontSize: ".8rem" }}>WELCOME BACK</div>
+        <div className="jv-hero" style={{ fontSize: "1.8rem" }}>{user.name || "Sir"}</div>
+        <div className="jv-muted">All systems online. What are we building today?</div>
+      </div>
+      <div className="jv-hud-grid" style={{ marginBottom: "1.2rem" }}>
+        {cards.map((c) => (
+          <div key={c.label} className="jv-card" style={{ padding: "1.2rem", textAlign: "center" }}>
+            <div className="jv-mono" style={{ fontSize: "2.4rem", color: c.color, textShadow: `0 0 18px ${c.color}55` }}>{c.value}</div>
+            <div className="jv-muted jv-mono" style={{ fontSize: ".72rem", marginTop: ".3rem" }}>{c.label.toUpperCase()}</div>
+          </div>
+        ))}
+      </div>
+      <div className="jv-mono jv-muted" style={{ marginBottom: ".6rem", fontSize: ".8rem" }}>QUICK ACTIONS</div>
+      <div className="jv-hud-grid" style={{ marginBottom: "1.2rem" }}>
+        {actions.map((a) => { const I = a.icon; return (
+          <button key={a.id} data-testid={`quick-${a.id}`} className="jv-card jv-quick" onClick={() => go(a.id)}>
+            <I size={20} /> <span>{a.label}</span>
+          </button>
+        ); })}
+      </div>
+      {stats.recent_apps?.length > 0 && (
+        <>
+          <div className="jv-mono jv-muted" style={{ marginBottom: ".6rem", fontSize: ".8rem" }}>RECENT APPS</div>
+          {stats.recent_apps.map((a) => (
+            <div key={a.id} className="jv-card" style={{ padding: ".7rem 1rem", marginBottom: ".5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{a.idea?.slice(0, 70)}</span>
+              <button className="jv-btn jv-btn-ghost" onClick={() => go("build")}>Open Builder</button>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------- Admin ------------------------------- */
+function AdminTab() {
+  const [users, setUsers] = useState([]);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("user");
+  const [msg, setMsg] = useState("");
+  const load = useCallback(() => http.get("/admin/users").then(({ data }) => setUsers(data.users || [])).catch(() => {}), []);
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    if (!email.trim()) return;
+    try { await http.post("/admin/users", { email: email.trim(), role }); setEmail(""); setMsg("✅ Access granted."); load(); }
+    catch (e) { setMsg("⚠️ " + (e.response?.data?.detail || "Failed.")); }
+    setTimeout(() => setMsg(""), 2500);
+  };
+  const remove = async (em) => {
+    try { await http.delete(`/admin/users/${encodeURIComponent(em)}`); load(); }
+    catch (e) { setMsg("⚠️ " + (e.response?.data?.detail || "Failed.")); setTimeout(() => setMsg(""), 2500); }
+  };
+
+  return (
+    <div data-testid="admin-tab">
+      <div className="jv-card" style={{ padding: "1.1rem 1.3rem", marginBottom: "1.2rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: ".6rem", marginBottom: ".3rem" }}>
+          <Shield size={20} color="var(--gold)" /><strong className="jv-mono">ACCESS CONTROL</strong>
+        </div>
+        <div className="jv-muted">Only people you allow here can sign in. You are the Super Admin.</div>
+      </div>
+      <div style={{ display: "flex", gap: ".6rem", marginBottom: ".4rem", flexWrap: "wrap" }}>
+        <input data-testid="admin-email" className="jv-input" style={{ flex: "1 1 220px" }} placeholder="person@gmail.com" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <select className="jv-select" style={{ width: 140 }} value={role} onChange={(e) => setRole(e.target.value)}>
+          <option value="user">User</option><option value="admin">Admin</option>
+        </select>
+        <button data-testid="admin-add" className="jv-btn" onClick={add}><Plus size={16} /> Grant Access</button>
+      </div>
+      {msg && <div className="jv-muted" style={{ marginBottom: ".6rem" }}>{msg}</div>}
+      <div style={{ marginTop: ".8rem" }}>
+        {users.map((u) => (
+          <div key={u.email} className="jv-card" style={{ padding: ".7rem 1rem", marginBottom: ".5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>{u.email} <span className="jv-chip" style={{ marginLeft: ".4rem" }}>{u.role}</span></span>
+            {u.role !== "super_admin" && (
+              <button className="jv-btn jv-btn-ghost" onClick={() => remove(u.email)}><Trash2 size={15} /> Revoke</button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------- Login ------------------------------- */
 function Login() {
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
@@ -325,8 +459,12 @@ function Login() {
 /* ------------------------------- App ------------------------------- */
 function App() {
   const [auth, setAuth] = useState(null); // null=checking, obj=user, false=login
-  const [tab, setTab] = useState("chat");
+  const [tab, setTab] = useState("hud");
   const [readAloud, setReadAloud] = useState(false);
+  const [booting, setBooting] = useState(true);
+  const [wake, setWake] = useState(false);
+  const [wakeSignal, setWakeSignal] = useState(0);
+  const wakeRef = useRef(null);
 
   useEffect(() => {
     const hash = window.location.hash;
@@ -340,10 +478,44 @@ function App() {
     http.get("/auth/me").then(({ data }) => setAuth(data)).catch(() => setAuth(false));
   }, []);
 
+  // boot animation + sound (once, after auth resolves to a user)
+  useEffect(() => {
+    if (auth && auth !== false && booting) {
+      playBootSound();
+      const t = setTimeout(() => setBooting(false), 2300);
+      return () => clearTimeout(t);
+    }
+  }, [auth, booting]);
+
+  // wake-word listener: "hey jarvis"
+  const toggleWake = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert("Wake word isn't supported in this browser."); return; }
+    if (wake) { wakeRef.current?.stop(); setWake(false); return; }
+    const r = new SR(); wakeRef.current = r; r.lang = "en-US"; r.continuous = true; r.interimResults = true;
+    r.onresult = (e) => {
+      const txt = Array.from(e.results).map((x) => x[0].transcript).join(" ").toLowerCase();
+      if (txt.includes("hey jarvis") || txt.includes("hey, jarvis")) {
+        setTab("chat"); setWakeSignal((n) => n + 1);
+      }
+    };
+    r.onend = () => { if (wakeRef.current) { try { r.start(); } catch { /* noop */ } } };
+    r.onerror = () => {};
+    setWake(true); r.start();
+  };
+  useEffect(() => () => { wakeRef.current = null; }, []);
+
   const logout = async () => { await http.post("/auth/logout").catch(() => {}); setAuth(false); };
 
   if (auth === null) return <div className="jv-app"><div className="jv-login"><span className="jv-arc" /><p className="jv-muted jv-mono" style={{ marginTop: "1rem" }}>BOOTING J.A.R.V.I.S…</p></div></div>;
   if (auth === false) return <Login />;
+  if (booting) return <div className="jv-app"><BootScreen /></div>;
+
+  const tabs = [
+    { id: "hud", label: "HUD", icon: LayoutDashboard },
+    ...TABS,
+    ...(auth.is_admin ? [{ id: "admin", label: "Admin", icon: Shield }] : []),
+  ];
 
   return (
     <div className="jv-app">
@@ -357,7 +529,10 @@ function App() {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: ".7rem" }}>
-            <button className={`jv-btn jv-btn-ghost`} onClick={() => setReadAloud(!readAloud)} title="Read replies aloud">
+            <button className={`jv-btn jv-btn-ghost ${wake ? "jv-mic rec" : ""}`} onClick={toggleWake} title='Wake word: say "Hey Jarvis"'>
+              <Radio size={16} />
+            </button>
+            <button className="jv-btn jv-btn-ghost" onClick={() => setReadAloud(!readAloud)} title="Read replies aloud">
               {readAloud ? <Volume2 size={16} /> : <VolumeX size={16} />}
             </button>
             {auth.picture && <img src={auth.picture} alt="me" style={{ width: 36, height: 36, borderRadius: "50%", border: "2px solid var(--gold)" }} />}
@@ -365,23 +540,23 @@ function App() {
           </div>
         </div>
 
-        <div style={{ marginBottom: "1.2rem" }}>
-          {["Chat", "Research", "Email", "Images", "Builder"].map((c) => <span key={c} className="jv-chip">{c}</span>)}
-        </div>
+        {wake && <div className="jv-muted jv-mono" style={{ marginBottom: ".8rem", color: "var(--red-2)" }}>● listening for "Hey Jarvis"…</div>}
 
         <div style={{ display: "flex", gap: ".35rem", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: ".35rem", marginBottom: "1.4rem", overflowX: "auto" }}>
-          {TABS.map((t) => { const Icon = t.icon; return (
+          {tabs.map((t) => { const Icon = t.icon; return (
             <button key={t.id} data-testid={`tab-${t.id}`} className={`jv-tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)} style={{ display: "flex", alignItems: "center", gap: ".4rem" }}>
               <Icon size={16} /> {t.label}
             </button>
           ); })}
         </div>
 
-        {tab === "chat" && <ChatTab readAloud={readAloud} />}
+        {tab === "hud" && <HudTab user={auth} go={setTab} />}
+        {tab === "chat" && <ChatTab readAloud={readAloud} wakeSignal={wakeSignal} />}
         {tab === "email" && <EmailTab />}
         {tab === "research" && <ResearchTab />}
         {tab === "image" && <ImageTab />}
         {tab === "build" && <BuildTab />}
+        {tab === "admin" && auth.is_admin && <AdminTab />}
 
         <div className="jv-footer" data-testid="footer">For my ❤️ Itisha Beta</div>
       </div>
