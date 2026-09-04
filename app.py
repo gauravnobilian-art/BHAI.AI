@@ -443,6 +443,15 @@ def toggle_research_pin(rid: str) -> None:
     _write_json(path, reports)
 
 
+def set_research_tags(rid: str, tags: List[str]) -> None:
+    path = os.path.join(_user_dir("research"), "reports.json")
+    reports = _read_json(path, [])
+    for r in reports:
+        if r["id"] == rid:
+            r["tags"] = tags
+    _write_json(path, reports)
+
+
 # ---- self-upgrade log + pending proposals + settings ----
 def load_upgrade_log() -> List[dict]:
     return _read_json(os.path.join(_user_dir("upgrades"), "log.json"), [])
@@ -554,6 +563,57 @@ def promote_preview_to_live() -> tuple[bool, str]:
         return True, backup
     except OSError as exc:
         return False, str(exc)
+
+
+def list_backups() -> List[dict]:
+    bdir = _user_dir("backups")
+    items = []
+    for name in sorted(os.listdir(bdir), reverse=True):
+        if name.startswith("app_") and name.endswith(".py"):
+            fpath = os.path.join(bdir, name)
+            ts = name[4:-3]
+            try:
+                when = datetime.fromtimestamp(int(ts), timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            except ValueError:
+                when = ts
+            items.append({"name": name, "path": fpath, "when": when,
+                          "size": os.path.getsize(fpath)})
+    return items
+
+
+def restore_backup(path: str) -> tuple[bool, str]:
+    app_path = os.path.join(_app_dir(), "app.py")
+    if not os.path.exists(path):
+        return False, "Backup not found."
+    try:
+        # snapshot current before restoring, so a bad restore is also reversible
+        with open(app_path, "r", encoding="utf-8") as fh:
+            live = fh.read()
+        with open(os.path.join(_user_dir("backups"), f"app_{int(time.time())}.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(live)
+        with open(path, "r", encoding="utf-8") as fh:
+            restored = fh.read()
+        with open(app_path, "w", encoding="utf-8") as fh:
+            fh.write(restored)
+        return True, "Restored"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def build_preview_diff() -> str:
+    """Side-by-side HTML diff between live app.py and app_preview.py."""
+    import difflib
+    app_path = os.path.join(_app_dir(), "app.py")
+    preview_path = os.path.join(_app_dir(), "app_preview.py")
+    if not os.path.exists(preview_path):
+        return ""
+    with open(app_path, encoding="utf-8") as fh:
+        live = fh.read().splitlines()
+    with open(preview_path, encoding="utf-8") as fh:
+        preview = fh.read().splitlines()
+    return difflib.HtmlDiff(wrapcolumn=70).make_table(
+        live, preview, "Live app.py", "app_preview.py", context=True, numlines=2)
 
 
 # ----------------------------------------------------------------------------- #
@@ -969,16 +1029,26 @@ def workspace_research() -> None:
     if reports:
         st.divider()
         st.markdown(f"#### 🗂️ Research History ({len(reports)})")
-        term = st.text_input("🔍 Search past reports", key="research-search",
-                             placeholder="Filter by keyword…").strip().lower()
+        fcol1, fcol2 = st.columns([2, 1])
+        term = fcol1.text_input("🔍 Search past reports", key="research-search",
+                                placeholder="Filter by keyword…").strip().lower()
+        all_tags = sorted({t for r in reports for t in r.get("tags", [])})
+        tag_filter = fcol2.multiselect("🏷️ Filter by tag", all_tags, key="research-tag-filter")
         if term:
             reports = [r for r in reports
                        if term in r["query"].lower() or term in r["summary"].lower()]
+        if tag_filter:
+            reports = [r for r in reports
+                       if set(tag_filter).issubset(set(r.get("tags", [])))]
+        if term or tag_filter:
             st.caption(f"{len(reports)} match(es)")
         reports = sorted(reports, key=lambda r: not r.get("pinned", False))
         for rep in reports:
             pin = "📌 " if rep.get("pinned") else ""
+            tag_str = ("  " + " ".join(f"`{t}`" for t in rep.get("tags", []))) if rep.get("tags") else ""
             with st.expander(f"{pin}🔎 {rep['query']}  ·  {rep['time'][:10]}"):
+                if tag_str.strip():
+                    st.markdown("🏷️" + tag_str)
                 st.markdown(rep["summary"])
                 cols = st.columns([1, 1, 1])
                 cols[0].download_button(
@@ -994,6 +1064,17 @@ def workspace_research() -> None:
                 if cols[2].button("🗑️ Delete", key=f"rehist-del-{rep['id']}",
                                   use_container_width=True):
                     delete_research(rep["id"])
+                    st.rerun()
+                tcol1, tcol2 = st.columns([3, 1])
+                new_tags = tcol1.text_input("🏷️ Tags (comma separated)",
+                                            value=", ".join(rep.get("tags", [])),
+                                            key=f"rehist-tags-{rep['id']}",
+                                            label_visibility="collapsed",
+                                            placeholder="e.g. ai, policy, europe")
+                if tcol2.button("Save tags", key=f"rehist-savetags-{rep['id']}",
+                                use_container_width=True):
+                    tags = [t.strip() for t in new_tags.split(",") if t.strip()]
+                    set_research_tags(rep["id"], tags)
                     st.rerun()
 
 
@@ -1071,67 +1152,147 @@ def _parse_files(raw: str) -> List[dict]:
     return files
 
 
+def _extract_html(raw: str) -> str:
+    """Pull a full self-contained HTML document out of an LLM reply."""
+    import re
+    fence = re.search(r"```(?:html)?\s*(<!DOCTYPE html.*?</html>)\s*```", raw,
+                      re.DOTALL | re.IGNORECASE)
+    if fence:
+        return fence.group(1).strip()
+    doc = re.search(r"(<!DOCTYPE html.*?</html>)", raw, re.DOTALL | re.IGNORECASE)
+    if doc:
+        return doc.group(1).strip()
+    return raw.strip()
+
+
+def generate_live_app(idea: str, refine: str = "", current_html: str = "") -> str:
+    """Generate/iterate a single-file, self-contained, runnable web app (HTML+CSS+JS)."""
+    sys = ("You are an elite full-stack engineer. Build a COMPLETE, production-quality, "
+           "SELF-CONTAINED single-file web app as ONE HTML document with inline <style> and "
+           "<script> (vanilla JS, no external build step). It must actually WORK when opened: "
+           "real interactivity, sensible sample data, polished modern UI, responsive layout. "
+           "You MAY use CDN links (e.g. Tailwind via CDN, Chart.js, font CDNs). "
+           "Return ONLY the HTML document from <!DOCTYPE html> to </html>. No commentary.")
+    if refine and current_html:
+        user = (f"Here is the current app:\n```html\n{current_html[:6000]}\n```\n\n"
+                f"Apply this change and return the full updated HTML document:\n{refine}")
+    else:
+        user = f"App idea: {idea}\n\nBuild the full working app now."
+    raw = llm_chat([{"role": "system", "content": sys},
+                    {"role": "user", "content": user}], temperature=0.4, max_tokens=4000)
+    return _extract_html(raw)
+
+
+def _render_live_preview(html: str, height: int = 520) -> None:
+    import streamlit.components.v1 as components
+    components.html(html, height=height, scrolling=True)
+
+
 def workspace_project() -> None:
-    st.subheader("🚀 Project Agent (Mini-Emergent)")
-    st.caption("Drop an idea. A Planner agent designs it, then a Coder agent writes the files.")
+    st.subheader("🚀 Project Agent — Live App Builder")
+    st.caption("Drop an idea. Watch Jarvis plan, build and render a WORKING app live — "
+               "then download the production files.")
 
-    idea = st.text_area("Your software idea",
-                        placeholder="e.g. A CLI tool that converts CSV files to a nice HTML report",
-                        height=110, key="proj-idea")
+    idea = st.text_area("Your app idea",
+                        placeholder="e.g. A habit tracker with streaks, charts and dark mode",
+                        height=90, key="proj-idea")
 
-    if st.button("🤖 Activate Agents", key="proj-run"):
+    if st.button("🤖 Build it live", key="proj-run"):
         if not idea.strip():
             st.warning("Describe your idea first.", icon="⚠️")
             return
 
-        # Agent 1 — Planner
-        with st.status("🧭 Planner agent designing the architecture…", expanded=True) as status:
+        progress = st.progress(0, text="Starting agents…")
+
+        # Agent 1 — Planner (Expected spec)
+        with st.status("🧭 Planner — designing the spec…", expanded=True) as status:
             plan = llm_chat([
                 {"role": "system",
-                 "content": "You are a senior software architect. Produce a crisp technical "
-                            "plan: tech stack, file structure, and what each file does. "
-                            "Be concise and actionable."},
-                {"role": "user", "content": f"Project idea: {idea}"},
+                 "content": "You are a senior product architect. Produce a crisp spec for the app: "
+                            "purpose, key features (bullet list), main UI sections, and tech notes. "
+                            "This is the EXPECTED outcome. Be concise."},
+                {"role": "user", "content": f"App idea: {idea}"},
             ], temperature=0.4)
             st.markdown(plan)
-            status.update(label="✅ Planner finished", state="complete")
+            status.update(label="✅ Spec ready (Expected)", state="complete")
         st.session_state["proj_plan"] = plan
+        progress.progress(35, text="Spec ready — building the working app…")
 
-        # Agent 2 — Coder
-        with st.status("👨‍💻 Coder agent writing the files…", expanded=False) as status:
+        # Agent 2 — Builder (live working app)
+        with st.status("👨‍💻 Builder — writing a working app…", expanded=False) as status:
+            html = generate_live_app(idea)
+            status.update(label="✅ Working app built (Current)", state="complete")
+        st.session_state["live_app_html"] = html
+        progress.progress(80, text="Rendering live preview…")
+
+        # Agent 3 — Packager (production multi-file)
+        with st.status("📦 Packager — production files…", expanded=False) as status:
             code_raw = llm_chat([
                 {"role": "system",
-                 "content": "You are an expert engineer. Implement the plan as a COMPLETE, "
-                            "RUNNABLE project folder. You MUST include:\n"
-                            "  - all source files\n"
-                            "  - a dependency manifest (requirements.txt / package.json)\n"
-                            "  - a README.md with an Overview, Setup steps, and Run commands\n"
-                            "Output EACH file STRICTLY in this format and nothing else:\n"
+                 "content": "You are an expert engineer. Turn the app into a COMPLETE runnable "
+                            "project folder: all source files, a dependency manifest, and a "
+                            "README.md (Overview, Setup, Run). Output EACH file STRICTLY as:\n"
                             "=== relative/path/file.ext ===\n```lang\n<code>\n```\n"
-                            "Repeat for every file. No prose outside the blocks."},
-                {"role": "user", "content": f"Idea: {idea}\n\nPlan:\n{plan}"},
+                            "No prose outside the blocks."},
+                {"role": "user", "content": f"Idea: {idea}\n\nSpec:\n{plan}\n\n"
+                                             f"Reference working app:\n{html[:3000]}"},
             ], temperature=0.3, max_tokens=3500)
-            status.update(label="✅ Coder finished", state="complete")
+            status.update(label="✅ Production files ready", state="complete")
         st.session_state["proj_files"] = _parse_files(code_raw)
         st.session_state["proj_raw"] = code_raw
+        progress.progress(100, text="Done!")
 
+    # ---- Current vs Expected + live preview ----
+    if st.session_state.get("live_app_html"):
+        st.divider()
+        st.markdown("### 🔴 Live Preview — Current vs Expected")
+        left, right = st.columns([3, 2])
+        with left:
+            st.markdown("**🟢 Current (working app)**")
+            _render_live_preview(st.session_state["live_app_html"])
+            st.download_button("⬇️ Download index.html",
+                               data=st.session_state["live_app_html"],
+                               file_name="index.html", mime="text/html",
+                               key="live-html-dl")
+        with right:
+            st.markdown("**🎯 Expected (spec)**")
+            with st.container(border=True, height=520):
+                st.markdown(st.session_state.get("proj_plan", "_No spec yet._"))
+
+        # ---- live iteration ----
+        st.markdown("#### ✏️ Refine the app (updates the live preview)")
+        refine = st.text_input("Describe a change",
+                               placeholder="e.g. add a dark mode toggle and a summary chart",
+                               key="proj-refine")
+        if st.button("🔁 Apply change & re-render", key="proj-refine-btn"):
+            if refine.strip():
+                with st.status("👨‍💻 Applying your change…", expanded=False) as status:
+                    st.session_state["live_app_html"] = generate_live_app(
+                        idea, refine, st.session_state["live_app_html"])
+                    status.update(label="✅ Updated — preview refreshed", state="complete")
+                st.rerun()
+
+    # ---- production files ----
     if st.session_state.get("proj_files"):
         files = st.session_state["proj_files"]
+        st.divider()
         head = st.columns([3, 1])
-        head[0].markdown(f"#### 📦 Generated files ({len(files)})")
+        head[0].markdown(f"#### 📦 Production files ({len(files)})")
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in files:
                 zf.writestr(f["path"], f["code"])
             if st.session_state.get("proj_plan"):
                 zf.writestr("PLAN.md", st.session_state["proj_plan"])
+            if st.session_state.get("live_app_html"):
+                zf.writestr("preview/index.html", st.session_state["live_app_html"])
         head[1].download_button("⬇️ Download ZIP", data=buf.getvalue(),
                                 file_name="jarvis-project.zip", mime="application/zip",
                                 use_container_width=True, key="proj-zip")
 
         readme = next((f for f in files if f["path"].lower().endswith("readme.md")), None)
         if readme:
-            with st.expander("📖 Setup & Run instructions", expanded=True):
+            with st.expander("📖 Setup & Run instructions", expanded=False):
                 st.markdown(readme["code"])
 
         for f in files:
@@ -1141,9 +1302,6 @@ def workspace_project() -> None:
                 st.download_button("⬇️ Download", data=f["code"],
                                    file_name=f["path"].split("/")[-1],
                                    key=f"dl-{f['path']}")
-    elif st.session_state.get("proj_raw"):
-        st.markdown("#### 📦 Coder output")
-        st.code(st.session_state["proj_raw"])
 
 
 # ----------------------------------------------------------------------------- #
@@ -1153,8 +1311,9 @@ def workspace_project() -> None:
 JARVIS_CAPABILITIES = (
     "Jarvis Personal OS — a Streamlit app with: Google OAuth login; AI Chat & Rewriter "
     "(Groq/SambaNova Llama-3.3-70B) with voice input and read-aloud; Email Generator with "
-    "saved templates; Smart Web Research (DuckDuckGo) with PDF export and history; Image "
-    "Generator (Pollinations) with a saved gallery; and a Project Agent (Planner->Coder)."
+    "saved templates; Smart Web Research (DuckDuckGo) with PDF export, history, tags & pins; "
+    "Image Generator (Pollinations) with a saved gallery; a live App Builder (Planner->Builder"
+    "->Packager) with real-time preview; and a Self-Upgrade Center with preview/rollback."
 )
 
 
@@ -1298,6 +1457,12 @@ def workspace_upgrade() -> None:
             settings.update({"digest_email": d_on, "smtp_host": host, "smtp_port": int(port),
                              "smtp_user": user, "digest_to": to_addr})
             save_settings(settings)
+        if st.checkbox("👁️ Preview digest content", key="digest-preview"):
+            items = load_pending()
+            if items:
+                st.code(build_digest_text(items), language="text")
+            else:
+                st.info("No pending proposals to summarise yet.")
         if st.button("📧 Send digest now", key="digest-send"):
             items = load_pending()
             if not items:
@@ -1411,6 +1576,20 @@ def workspace_upgrade() -> None:
                 st.success(f"Preview built → `{os.path.basename(path)}`. "
                            "Test it with `streamlit run app_preview.py`.")
             if st.session_state.get("preview_built"):
+                with st.expander("🔍 Diff viewer — preview vs live app"):
+                    diff_html = build_preview_diff()
+                    if diff_html:
+                        import streamlit.components.v1 as components
+                        components.html(
+                            "<style>table.diff{font-family:monospace;font-size:12px;width:100%}"
+                            ".diff_header{background:#1e2937;color:#7d8896}"
+                            "td{padding:1px 6px}.diff_next{background:#141b26}"
+                            ".diff_add{background:#0f3a2f;color:#00f5d4}"
+                            ".diff_chg{background:#3a340f;color:#ffd166}"
+                            ".diff_sub{background:#3a0f1e;color:#ff6b81}</style>" + diff_html,
+                            height=460, scrolling=True)
+                    else:
+                        st.info("Build a preview first to see the diff.")
                 with st.popover("🚀 Promote preview to live", use_container_width=True):
                     st.warning("This replaces your live `app.py` (a timestamped backup is saved "
                                "first). The app will reload.", icon="⚠️")
@@ -1432,6 +1611,23 @@ def workspace_upgrade() -> None:
         if st.button("🗑️ Clear evolution log", key="upg-clear"):
             save_upgrade_log([])
             st.rerun()
+
+    # ---- rollback: restore any previous app.py backup ----
+    backups = list_backups()
+    if backups:
+        st.divider()
+        st.markdown(f"#### ↩️ Rollback  ·  {len(backups)} backup(s)")
+        st.caption("Restore your live app to any previous version. The current app is snapshotted "
+                   "before restoring, so you can always go back.")
+        for b in backups:
+            rc1, rc2 = st.columns([3, 1])
+            rc1.markdown(f"🗄️ **{b['when']}**  ·  {b['size']//1000} KB")
+            if rc2.button("↩️ Restore", key=f"rollback-{b['name']}", use_container_width=True):
+                ok, msg = restore_backup(b["path"])
+                if ok:
+                    st.success(f"Restored to {b['when']}. App will reload.")
+                else:
+                    st.error(msg)
 
 
 # ----------------------------------------------------------------------------- #

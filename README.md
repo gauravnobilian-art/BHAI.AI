@@ -16,8 +16,8 @@ project scaffolding. Designed to run on your custom domain **https://apnabihar.o
 | ✉️ **Email Generator** | Recipient + goal + tone → formatted draft, with saveable ⭐ templates |
 | 🔎 **Smart Web Research** | Live DuckDuckGo search → cited summary, PDF export + searchable history |
 | 🖼️ **Image Generator** | Free & unlimited Pollinations images + persistent gallery |
-| 🚀 **Project Agent** | Planner → Coder that generates a runnable folder (README + setup) as a ZIP |
-| 🛠️ **Self-Upgrade Center** | Jarvis researches the web to propose fixes/upgrades you approve or deny |
+| 🚀 **Project Agent** | Live App Builder: Planner→Builder→Packager with a **real-time working preview** (Current vs Expected), inline iteration, and production ZIP |
+| 🛠️ **Self-Upgrade Center** | Web-researched upgrade proposals you approve/deny, weekly email digest, safe preview + diff, promote-to-live and one-click rollback |
 
 - 🔐 **Google login wall** — nobody reaches the app without signing in.
 - 🧠 Free **Llama-3.3-70B** brain via **Groq** or **SambaNova** (pick in sidebar).
