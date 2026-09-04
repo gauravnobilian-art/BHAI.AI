@@ -1527,6 +1527,24 @@ def add_netlify_domain(token: str, site_id: str, domain: str) -> tuple[bool, str
         return False, str(exc)
 
 
+@st.fragment(run_every=60)
+def _domain_autocheck_fragment() -> None:
+    """Re-checks the pending domain every 60s until DNS+SSL are live, then stops."""
+    domain = st.session_state.get("autocheck_domain")
+    if not domain:
+        return
+    stt = domain_status(domain)
+    d1, d2 = st.columns(2)
+    d1.markdown("🟢 DNS resolving" if stt["dns_ok"] else "🔴 DNS not resolving")
+    d2.markdown("🟢 HTTPS / SSL live" if stt["https_ok"] else "🟡 SSL pending")
+    if stt["dns_ok"] and stt["https_ok"]:
+        st.success(f"🎉 `{domain}` is fully live! Auto-refresh stopped.")
+        st.session_state["autocheck_on"] = False
+        st.rerun()
+    else:
+        st.caption(f"{stt['detail']} · re-checking automatically every 60s…")
+
+
 
 def workspace_project() -> None:
     st.subheader("🚀 Project Agent — Live App Builder")
@@ -1703,7 +1721,8 @@ def workspace_project() -> None:
                 cur_domain = existing.get("custom_domain")
                 if cur_domain:
                     st.markdown(f"**Domain:** `{cur_domain}`")
-                    if st.button("🔎 Check DNS / SSL status", key="domain-status-btn"):
+                    dsc1, dsc2 = st.columns(2)
+                    if dsc1.button("🔎 Check DNS / SSL status", key="domain-status-btn"):
                         with st.spinner("Checking domain…"):
                             stt = domain_status(cur_domain)
                         d1, d2 = st.columns(2)
@@ -1712,6 +1731,13 @@ def workspace_project() -> None:
                         d2.markdown(("🟢 HTTPS / SSL live" if stt["https_ok"]
                                      else "🟡 SSL pending"))
                         st.caption(stt["detail"])
+                    auto = dsc2.checkbox("🔄 Auto-refresh until live",
+                                         value=st.session_state.get("autocheck_on", False),
+                                         key="domain-autorefresh")
+                    st.session_state["autocheck_on"] = auto
+                    if auto:
+                        st.session_state["autocheck_domain"] = cur_domain
+                        _domain_autocheck_fragment()
 
             # --- Vercel ---
             with dtabs[1]:
