@@ -53,12 +53,18 @@ class TestAdminAllowList:
         try:
             assert c.post(f"{BASE_URL}/api/admin/users",
                           json={"email": email, "role": "user"}, timeout=30).status_code == 200
+            # role is now a Literal["user","admin"] -> upsert to a valid role
             assert c.post(f"{BASE_URL}/api/admin/users",
-                          json={"email": email, "role": "editor"}, timeout=30).status_code == 200
+                          json={"email": email, "role": "admin"}, timeout=30).status_code == 200
             users = c.get(f"{BASE_URL}/api/admin/users", timeout=30).json()["users"]
             matches = [u for u in users if u["email"] == email]
             assert len(matches) == 1, f"duplicate allow-list entries: {matches}"
-            assert matches[0]["role"] == "editor"
+            assert matches[0]["role"] == "admin"
+            # invalid / escalating roles must be rejected
+            for bad in ("editor", "super_admin", ""):
+                r = c.post(f"{BASE_URL}/api/admin/users",
+                           json={"email": email, "role": bad}, timeout=30)
+                assert r.status_code == 422, f"role={bad!r} -> {r.status_code}"
         finally:
             mongo.allowed_users.delete_many({"email": email})
 

@@ -40,3 +40,16 @@ so Jarvis was rebuilt natively on React+FastAPI to be usable at the emergent.hos
 
 ## Test credentials
 None (no auth yet). EMERGENT_LLM_KEY in /app/backend/.env.
+
+## Update 2026-06 — Async Builder + preview fixes (verified)
+- `POST /api/build` is now an ASYNC background job: inserts an app doc `status:"running"`,
+  spawns `asyncio.create_task(_run_build)` (strong ref kept in `_BUILD_TASKS`), and returns
+  `{id, status:"running"}` in ~0.1s. Frontend `build()` polls `GET /api/apps/{id}` every 3s
+  until `done`/`error`. This removed the 60s ingress **502 timeout** (P0). Verified E2E.
+- Preview quality guard: `_bad_preview()` retries the Preview agent when the HTML is truncated
+  OR uses React/JSX without Babel. Preview agent prompt now forces VANILLA HTML/CSS/JS only, so
+  the live iframe renders (was blank before). Verified: Kanban/todo previews render fully.
+- ZIP: global path de-dupe (`_dedupe_files`) + zip-slip sanitisation; `frontend/Dockerfile`
+  auto-added when `docker-compose.yml` is present. Backend/frontend agent tokens raised to 8000.
+- Remaining minor (P2/P3): occasional backend-agent file truncation; stale "running" docs on
+  process restart aren't reaped.

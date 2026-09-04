@@ -1,0 +1,54 @@
+{
+  "summary": "Backend-only retest of the iteration_5 truncation fix. Full pytest suite (44 cases) run against the public preview URL: 42 passed, 2 failed - both failures are the /api/build tests, which got HTTP 502 Bad gateway. Root cause isolated with two extra timed probes: a real build now takes ~60-62s server-side (public probe 502 at exactly 60.4s; internal localhost probe 200 in 61.7s), i.e. the raised max_tokens pushed /api/build past the platform's 60s ingress timeout, so the endpoint is now effectively BROKEN over the public URL (users see 502 while the LLM keeps running and the app doc is still inserted -> orphan docs). PARTIALLY FIXED: on the 2 builds that did complete (1 public + 1 internal, 24-26 files each) the required entrypoints are now present and correctly prefixed: backend/server.py (23 KB, real FastAPI, complete tail), backend/requirements.txt, backend/.env.example, frontend/src/App.js, frontend/package.json, frontend/src/api.js + components/pages, README.md, docker-compose.yml, backend/Dockerfile. preview_html now starts with <!DOCTYPE html> and ends with </html> on 2/2 builds. STILL BROKEN: the closing tags are only the _extract_html() auto-close band-aid - the preview content itself is still truncated by the LLM (35,998 and 37,166 chars, cut mid-JSX attribute, e.g. ...bg-blue-700 then </body></html>), so the shipped single-file demo contains an unterminated tag/JS statement and will almost certainly render blank/broken. Also seen: duplicate generated path (backend/requirements.txt emitted by both Backend and DevOps agents) -> duplicate zip entry; frontend/Dockerfile missing although docker-compose.yml references ./frontend. Regression all green: /api/chat (+history/clear), /api/email, /api/research, /api/auth/me, /api/stats (per-user isolation), /api/history/*, admin allow-list endpoints, refine build path (returns complete HTML with the requested change, files == []), zip ownership scoping (404 cross-user / unknown id), and 401 for unauthenticated /api/build and /api/apps/{id}/zip. All seeded users/sessions/allow-list entries and orphaned TEST app docs purged.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/build", "issue": "NEW REGRESSION from the max_tokens increase: the build now takes ~60-62s and the public ingress cuts the request at 60s -> client gets HTTP 502 Bad gateway (observed 3 out of 4 public attempts; internal localhost call returns 200 in 61.7s, proving the backend itself is fine but too slow). Two concurrent builds make it 100%. Fix: make /api/build asynchronous (return an app id immediately + poll/SSE status), or split the 4 parallel agents into smaller/faster calls, or cap the preview agent's tokens - the current synchronous request cannot fit in the 60s gateway window.", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/build", "issue": "preview_html is STILL content-truncated (2/2 completed builds): 35,998 and 37,166 chars ending mid-JSX attribute (tail: '...className=\"px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700' then the injected '</body></html>'). _extract_html()'s auto-close only makes the document *look* valid - the unterminated tag/JS inside the <script> will throw a syntax error and the live preview will render blank. The preview agent needs a real fix: detect truncation (finish_reason/length or unbalanced braces) and retry with a leaner/compacter demo prompt, or generate the demo in 2 passes; do not persist a truncated document.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/build", "issue": "Duplicate file paths across agents are not de-duplicated globally (_parse_files keeps a per-call `seen` set only): build #1 returned backend/requirements.txt twice (Backend + DevOps agents), producing a duplicate entry in the generated zip. De-dupe by path after merging the agent outputs."},
+      {"endpoint": "POST /api/build", "issue": "DevOps agent emitted docker-compose.yml + backend/Dockerfile but NO frontend/Dockerfile, although the compose file declares a ./frontend build context -> `docker compose up` fails on the downloaded zip."},
+      {"endpoint": "POST /api/build", "issue": "The trailing-unterminated-block recovery in _parse_files() is ineffective in practice: it uses re.search (first match) with (.*)$ and then rejects the capture if it contains '```', so whenever the agent emitted more than one file the truncated last block is still dropped. Use finditer / parse from the LAST '=== path ===' marker instead."},
+      {"endpoint": "POST /api/build", "issue": "When the client disconnects (ingress 502) the handler still completes and inserts the app doc, leaving orphan db.apps documents the user never sees a response for (2 such orphans were found and cleaned up during this run)."},
+      {"endpoint": "POST /api/auth/session", "issue": "Pre-existing (iteration_5): duplicate db.users docs for gauravklegacy@gmail.com still present in live data (2 users, 4 sessions); no upsert-by-email / unique indexes. Still uses blocking requests.get() in an async route and has no TTL index on user_sessions.expires_at."},
+      {"endpoint": "/api/research", "issue": "Pre-existing: a DuckDuckGo outage is reported as HTTP 200 with a 'No live web results' summary."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_build_truncation.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_auth_access.py",
+    "/app/backend/tests/test_admin.py",
+    "/app/backend/tests/manual_build_probe.py",
+    "/app/backend/tests/manual_build_internal_probe.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: /api/build exceeds the 60s ingress timeout -> public 502. Convert it to a job-based flow (POST returns id + status, GET /api/apps/{id} polls) or cut total agent latency below ~45s.",
+    "Fix the real preview truncation: detect a truncated LLM response (missing </html> before auto-close, unbalanced braces) and retry with a compact prompt instead of persisting a broken demo.",
+    "De-duplicate merged file paths and make the DevOps agent always emit frontend/Dockerfile to match docker-compose.yml.",
+    "Rewrite the _parse_files trailing-block recovery to scan from the LAST '=== path ===' marker (current implementation never fires when >1 file is present).",
+    "Guard against orphan db.apps inserts when the client has already disconnected."
+  ],
+  "critical_code_review_comments": [
+    "_extract_html() now masks truncation by appending </body></html>: the API reports success while shipping syntactically broken HTML into db.apps and preview/index.html. Truncation must be surfaced/retried, not hidden.",
+    "No path sanitisation on model-emitted paths (zip-slip: '../x' or absolute paths are written verbatim into the zip).",
+    "asyncio.gather(..., return_exceptions=True) + _safe() still swallows per-agent failures into empty strings; surface per-agent status in the 'agents' field.",
+    "server.py is 519 lines mixing auth, admin and the whole builder pipeline - extract the builder agents into builder.py.",
+    "SUPER_ADMIN still hard-coded; no indexes on user_sessions.session_token / users.user_id."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_build_truncation.py",
+    "/app/backend/tests/manual_build_probe.py",
+    "/app/backend/tests/manual_build_internal_probe.py"
+  ],
+  "success_rate": {"backend": "95% (42/44 pytest cases; both failures are /api/build 502 gateway timeouts)", "frontend": "not tested (out of scope)"},
+  "seed_data_creation": "Mongo-seeded per-class users + user_sessions (+allowed_users) via conftest fixtures and two standalone probe scripts; all purged, plus 2 orphaned TEST app docs deleted manually. Only the owner's real Google-login docs remain.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "/app/memory/test_credentials.md is accurate (super admin gauravklegacy@gmail.com + db.allowed_users); no external keys needed.",
+  "context_for_next_testing_agent": "Run `cd /app/backend && python -m pytest tests/ -q` (pytest.ini forces -n 2 --dist loadscope). IMPORTANT: two build tests exist (backend_test.py::TestBuildAndStats and test_build_truncation.py) and xdist runs them on different workers CONCURRENTLY, which guarantees the 60s ingress 502 - run them one at a time (`-n 0`) when re-verifying. For latency/truncation diagnosis use tests/manual_build_probe.py (public URL) and tests/manual_build_internal_probe.py (localhost:8001, bypasses the 60s proxy) - both self-seed and self-clean. Confirmed FIXED: backend/server.py + frontend/src/App.js + requirements.txt + package.json + README.md + docker-compose.yml now always present with backend/ and frontend/ prefixes; preview_html ends with </html>. Still open: 60s gateway 502 on /api/build, content-level preview truncation (~36k chars, cut mid-JSX), duplicate backend/requirements.txt, missing frontend/Dockerfile.",
+  "rca_of_the_issue": "Raising max_tokens (8k/8k/3k/9k) fixed the DROPPED FILES symptom (the backend/frontend agents now finish their last fenced block, so server.py/App.js survive _parse_files) but introduced a latency regression: generating ~36k chars of preview HTML plus two 8k-token agents takes ~60-62s, just over the platform's 60s ingress limit, so the public POST /api/build returns 502 while the server keeps working (observed 60.4s public 502 vs 61.7s internal 200). Separately, the preview agent still exhausts its 9k token budget, so the document is cut mid-attribute; _extract_html() appends </body></html> which satisfies the '</html>' assertion but leaves an unterminated tag/JS statement, i.e. the truncation is now hidden rather than fixed."
+}

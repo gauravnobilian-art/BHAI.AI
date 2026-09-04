@@ -87,3 +87,18 @@ def regular_user(mongo):
                       "Authorization": f"Bearer {token}"})
     yield {"client": s, "user_id": user_id, "token": token, "email": email}
     _purge(mongo, user_id, email)
+
+
+def poll_build(client, base_url, app_id, timeout=180, interval=3):
+    """Poll GET /api/apps/{id} until status is done/error. Returns the final doc."""
+    import time
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        r = client.get(f"{base_url}/api/apps/{app_id}", timeout=60)
+        assert r.status_code == 200, f"poll -> {r.status_code} {r.text[:300]}"
+        last = r.json()
+        if last.get("status") in ("done", "error"):
+            return last
+        time.sleep(interval)
+    raise AssertionError(f"build {app_id} did not finish in {timeout}s; last={str(last)[:300]}")

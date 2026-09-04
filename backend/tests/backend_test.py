@@ -3,9 +3,14 @@
 Auth is now mandatory on chat/email/research/build/history/stats, so every test here
 uses the `regular_user` fixture (Mongo-seeded session -> Authorization: Bearer <token>).
 """
+import io
+import uuid
+import zipfile
+from datetime import datetime, timezone
+
 import pytest
 
-from conftest import BASE_URL, LONG
+from conftest import BASE_URL, LONG, poll_build
 
 
 # --- Chat (LLM) + persistence ---
@@ -98,7 +103,8 @@ class TestResearch:
 
 # --- App Builder + /api/stats ---
 class TestBuildAndStats:
-    def test_build_returns_html_and_stats_reflect_it(self, regular_user, mongo):
+    def test_multiagent_build_zip_stats_and_history(self, regular_user, mongo):
+        """One (expensive) build call: multi-file full-stack output, zip, stats, history, delete."""
         c = regular_user["client"]
         before = c.get(f"{BASE_URL}/api/stats", timeout=30)
         assert before.status_code == 200
@@ -108,36 +114,140 @@ class TestBuildAndStats:
         assert isinstance(b["recent_apps"], list)
 
         r = c.post(f"{BASE_URL}/api/build",
-                   json={"idea": "a simple counter app with + and - buttons"}, timeout=300)
-        assert r.status_code == 200, r.text
-        html = r.json()["html"]
-        app_id = r.json()["id"]
-        assert html.lower().startswith("<!doctype html")
-        assert "</html>" in html.lower()
-        assert mongo.apps.find_one({"id": app_id}) is not None
+                   json={"idea": "a recipe sharing app with ratings"}, timeout=120)
+        assert r.status_code == 200, r.text[:800]
+        posted = r.json()
+        app_id = posted["id"]
+
+        # Soft assertions: one expensive build call must surface ALL findings.
+        problems = []
+
+        def check(cond, msg):
+            if not cond:
+                problems.append(msg)
+                print("FAIL:", msg)
+
+        check(posted.get("status") == "running", f"POST status: {posted.get('status')}")
+        check(isinstance(posted.get("agents"), list) and len(posted["agents"]) >= 4,
+              f"agents list unexpected: {posted.get('agents')}")
+
+        # --- poll the async job ---
+        d = poll_build(c, BASE_URL, app_id, timeout=180)
+        check(d["status"] == "done", f"build status={d['status']} error={d.get('error')!r}")
+
+        # --- plan ---
+        check(isinstance(d.get("plan"), str) and len(d["plan"].strip()) > 100,
+              f"plan too short/missing: {str(d.get('plan'))[:150]!r}")
+
+        # --- preview html ---
+        html = d.get("preview_html") or ""
+        check(html.lower().startswith("<!doctype html"), f"preview_html start: {html[:80]!r}")
+        check("</html>" in html.lower(),
+              f"preview_html TRUNCATED - no closing </html> (len={len(html)}), tail={html[-120:]!r}")
+
+        # --- multi-file full-stack project ---
+        files = d.get("files") or []
+        paths = [f["path"] for f in files]
+        print(f"GENERATED {len(files)} FILES:", paths)
+        print("PREVIEW LEN:", len(html), "PLAN LEN:", len(d.get("plan") or ""))
+        check(len(files) >= 6, f"only {len(files)} files: {paths}")
+        check(all(isinstance(f.get("content"), str) and f["content"].strip() for f in files),
+              f"empty file content in {paths}")
+        check(not (len(paths) == 1 and paths[0].lower().endswith(".html")),
+              f"single-html output only: {paths}")
+
+        lower = [p.lower() for p in paths]
+        backend_files = [p for p in lower if "server.py" in p or "requirements.txt" in p
+                         or "models.py" in p or p.startswith("backend/")]
+        frontend_files = [p for p in lower if "app.js" in p or "package.json" in p
+                          or p.startswith("frontend/") or "/components/" in p]
+        check(bool(backend_files), f"no backend files: {paths}")
+        check(any(p.endswith(("server.py", "main.py")) for p in lower),
+              f"no FastAPI entrypoint (server.py/main.py) generated: {paths}")
+        check(bool(frontend_files), f"no frontend files: {paths}")
+        check(any(p.endswith("app.js") or p.endswith("app.jsx") for p in lower),
+              f"no React entrypoint (src/App.js) generated: {paths}")
+        check(any("readme.md" in p for p in lower), f"no README.md: {paths}")
+        check(any("docker-compose" in p for p in lower), f"no docker-compose: {paths}")
+        srv = next((f for f in files if f["path"].lower().endswith("server.py")), None)
+        if srv:
+            check("fastapi" in srv["content"].lower(), "server.py has no FastAPI usage")
+            check(len(srv["content"]) > 400, f"server.py too small ({len(srv['content'])} chars)")
+            check(srv["content"].rstrip().endswith((")", "}", ":", '"', "'", "]", "e", "0", "1")),
+                  f"server.py may be truncated, tail={srv['content'][-80:]!r}")
+
+        # --- persistence ---
+        stored = mongo.apps.find_one({"id": app_id})
+        check(stored is not None, "app not persisted in db.apps")
+        if stored:
+            check(len(stored.get("files", [])) == len(files), "persisted file count mismatch")
+            check(bool(stored.get("preview_html")), "persisted preview_html empty")
+
+        # --- zip download ---
+        z = c.get(f"{BASE_URL}/api/apps/{app_id}/zip", timeout=120)
+        check(z.status_code == 200, f"zip status {z.status_code}: {z.text[:200]}")
+        if z.status_code == 200:
+            check("application/zip" in z.headers.get("content-type", ""),
+                  f"zip content-type {z.headers.get('content-type')}")
+            check("attachment" in z.headers.get("content-disposition", ""),
+                  f"zip disposition {z.headers.get('content-disposition')}")
+            zf = zipfile.ZipFile(io.BytesIO(z.content))
+            names = zf.namelist()
+            print("ZIP ENTRIES:", names)
+            check(zf.testzip() is None, "zip CRC failure")
+            check("preview/index.html" in names, f"preview/index.html missing: {names}")
+            missing = [p for p in paths if p not in names]
+            check(not missing, f"files missing from zip: {missing}")
+
+        # zip for unknown id -> 404
+        unknown = c.get(f"{BASE_URL}/api/apps/{uuid.uuid4()}/zip", timeout=60)
+        check(unknown.status_code == 404, f"unknown zip id -> {unknown.status_code}")
 
         after = c.get(f"{BASE_URL}/api/stats", timeout=30).json()
-        assert after["apps"] == b["apps"] + 1
-        assert any(a["id"] == app_id for a in after["recent_apps"])
-        assert all("_id" not in a for a in after["recent_apps"])
-        assert len(after["recent_apps"]) <= 5
+        check(after["apps"] == b["apps"] + 1, f"stats apps {b['apps']} -> {after['apps']}")
+        check(any(a["id"] == app_id for a in after["recent_apps"]), "app not in recent_apps")
+        check(all("_id" not in a for a in after["recent_apps"]), "_id leaked in recent_apps")
+        check(len(after["recent_apps"]) <= 5, "recent_apps > 5")
 
         # history + delete
         apps = c.get(f"{BASE_URL}/api/history/apps", timeout=30).json()["apps"]
-        assert any(a["id"] == app_id for a in apps)
-        assert c.delete(f"{BASE_URL}/api/history/apps/{app_id}", timeout=30).status_code == 200
-        assert mongo.apps.find_one({"id": app_id}) is None
+        check(any(a["id"] == app_id for a in apps), "app not in /api/history/apps")
+        check(c.delete(f"{BASE_URL}/api/history/apps/{app_id}", timeout=30).status_code == 200,
+              "delete app failed")
+        check(mongo.apps.find_one({"id": app_id}) is None, "app still in db after delete")
+
+        assert not problems, "\n".join(problems)
+
+    def test_zip_is_scoped_to_owner(self, regular_user, super_admin, mongo):
+        """Another user's app id must 404 (no cross-user access)."""
+        app_id = f"TEST_{uuid.uuid4().hex}"
+        mongo.apps.insert_one({"id": app_id, "user_id": regular_user["user_id"],
+                               "idea": "TEST scoping", "plan": "p",
+                               "files": [{"path": "a.txt", "content": "hello"}],
+                               "preview_html": "<!DOCTYPE html><html></html>",
+                               "created_at": datetime.now(timezone.utc)})
+        try:
+            ok = regular_user["client"].get(f"{BASE_URL}/api/apps/{app_id}/zip", timeout=60)
+            assert ok.status_code == 200
+            assert "a.txt" in zipfile.ZipFile(io.BytesIO(ok.content)).namelist()
+            other = super_admin["client"].get(f"{BASE_URL}/api/apps/{app_id}/zip", timeout=60)
+            assert other.status_code == 404, other.status_code
+        finally:
+            mongo.apps.delete_many({"id": app_id})
 
     def test_build_refine(self, regular_user):
         base = ("<!DOCTYPE html><html><head><title>Counter</title></head>"
                 "<body><h1 id='v'>0</h1></body></html>")
         r = regular_user["client"].post(f"{BASE_URL}/api/build", json={
-            "idea": "counter app", "refine": "add a reset button",
+            "idea": "counter app", "refine": "add a dark mode toggle",
             "current_html": base}, timeout=300)
-        assert r.status_code == 200, r.text
-        html = r.json()["html"]
-        assert html.lower().startswith("<!doctype html")
-        assert "reset" in html.lower()
+        assert r.status_code == 200, r.text[:500]
+        d = r.json()
+        html = d["preview_html"]
+        assert html.lower().startswith("<!doctype html"), html[:120]
+        assert "</html>" in html.lower()
+        assert "dark" in html.lower()
+        assert d["files"] == []
 
     def test_stats_isolated_per_user(self, super_admin):
         """A fresh user must see zeroed counters (no cross-user leakage)."""

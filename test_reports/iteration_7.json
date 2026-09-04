@@ -1,0 +1,80 @@
+{
+  "summary": "Iteration-7 retest of the /api/build ASYNC background-job refactor (P0 502 fix), plus full backend regression and a frontend Builder E2E. P0 IS FIXED: POST /api/build returned HTTP 200 in 0.14s with {id, status:'running', agents:[5]} (no 502, no ingress timeout); GET /api/apps/{id} polling transitioned running -> done in 83s and returned plan (5.3k chars), 20-21 files and preview_html. De-dup works (0 duplicate paths, zip entries all unique, 21 entries incl. preview/index.html), frontend/Dockerfile + backend/Dockerfile present whenever docker-compose.yml is emitted, preview_html ends with a single </html> and no placeholder fallback. Zip is a valid archive (CRC ok) containing every generated path. Refine path still returns preview_html synchronously with files == []. Auth scoping verified: GET /api/apps/{id} and /zip -> 404 for another user's id and for unknown ids, 401 unauthenticated (added /api/apps/{id} to the protected-route matrix and a new TestAppPollScoping class). Regression green: /api/chat + /api/history/chat + DELETE, /api/email, /api/research, /api/auth/me (bearer + cookie), /api/stats per-user isolation, /api/history/apps + delete, admin allow-list, session expiry/revocation. pytest: 44 passed / 2 failed (46) - both failures are LLM output-quality issues in the generated project, NOT the async plumbing. FRONTEND E2E (seeded cookie session, super admin): Builder tab opens, idea typed, build-run clicked, 'AGENTS WORKING IN PARALLEL' loader shown while polling, then build-preview iframe + 'PROJECT FILES (21)' + Download project (.zip) appeared; zip download fired (jarvis-app.zip); no 502 and no build-error. HUD/Chat/Admin tabs regression-tested OK. NEW P1 FOUND: the live preview iframe renders completely BLANK (iframe body innerText length = 0) because the Preview agent now emits React-18 UMD + react-router + react-query CDNs and RAW JSX inside a plain <script> tag with NO Babel - the browser throws a SyntaxError so nothing mounts. The document is complete (14,643 chars, ends </html>) so _is_truncated_html() cannot catch it. All seeded users/sessions/apps/chats purged (0 leftovers).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/build -> preview_html",
+        "issue": "P1 USER-VISIBLE: generated preview_html is a React app using UMD CDNs (react, react-dom, react-router-dom, @tanstack/react-query) with raw JSX inside <script> (no type='text/babel', no @babel/standalone) -> iframe renders a blank white panel (verified: iframe body innerText length 0). _is_truncated_html() passes it because the doc is well-formed and ends with </html>. Fix: force the Preview agent to emit plain HTML + CSS + VANILLA JS only (no JSX/React/build-step libs), or inject @babel/standalone and type='text/babel'; and add a server-side guard (e.g. if 'ReactDOM' or '=>.*<' JSX present and 'babel' absent -> retry with the vanilla prompt).",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/build -> files[]",
+        "issue": "Backend agent output is still intermittently cut off at max_tokens=6000 (1 of 3 builds this run): backend/server.py ended mid-signature ('...db: AsyncIOMotorDatabase = Depends(get') and backend/requirements.txt + backend/.env.example were never emitted in another build even though the prompt says ALWAYS include them. _parse_files() deliberately accepts the unterminated final block, so a syntactically invalid server.py is shipped in the zip. Suggest: per-file truncation check (unterminated code block) + a small repair/continuation call, or split the backend agent into 2 calls (server.py, then requirements/.env)."
+      },
+      {
+        "endpoint": "POST /api/build",
+        "issue": "asyncio.create_task(_run_build(...)) result is not stored in a module-level set, so the task can in principle be garbage-collected mid-flight and the doc would stay 'running' forever (frontend then shows the 'taking longer than expected' message after 300s). Keep a strong reference (background_tasks.add(t); t.add_done_callback(background_tasks.discard))."
+      },
+      {
+        "endpoint": "GET /api/apps/{id}",
+        "issue": "No terminal timeout for stuck jobs: if the process restarts while a build is running, the doc stays status='running' forever and the client polls 100 times. Consider marking stale 'running' docs as 'error' on startup."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "BuildTab live preview",
+        "issue": "Preview iframe is blank/white after a successful build (backend preview_html contains untranspiled JSX). User perceives the builder as broken even though files + zip are fine.",
+        "selector": "[data-testid=\"build-preview\"]",
+        "priority": "HIGH"
+      },
+      {
+        "component": "HudTab stat cards",
+        "issue": "MINOR: the zero value in 'CHAT MESSAGES' / 'EMAILS DRAFTED' renders in the display font as a slashed square glyph that reads like a broken-image icon (see screenshot); 'APPS BUILT 1' renders fine. Consider a plain numeric font for the counters.",
+        "selector": "HUD stat cards",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Builder",
+        "issues": ["Loader, file list, zip button, refine box all render correctly; only the preview iframe content is blank (backend content issue, not layout)."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_build_truncation.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_auth_access.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "P1: make the Preview agent produce vanilla HTML/CSS/JS (or add @babel/standalone + type='text/babel') and add a server-side JSX-without-Babel guard + retry - the live preview iframe is currently blank.",
+    "P2: harden against backend-agent token truncation (missing backend/requirements.txt & backend/.env.example, server.py cut mid-line) - detect unterminated final file and re-request.",
+    "P3: hold a strong reference to the asyncio.create_task background build task and mark stale 'running' docs as 'error' on startup."
+  ],
+  "critical_code_review_comments": [
+    "_is_truncated_html() only checks for '</html>' - it cannot detect a semantically dead preview (untranspiled JSX / unterminated <script>). Add a cheap sanity check: JSX/ReactDOM present without babel, or unbalanced <script> tags.",
+    "_parse_files() intentionally accepts a final UNTERMINATED code block; that is how a truncated server.py reaches the zip. Mark such files (e.g. 'truncated': true) and retry that agent instead of shipping invalid code.",
+    "asyncio.create_task(_run_build(...)) is fire-and-forget with no reference retained -> GC risk; also no per-build timeout.",
+    "server.py is ~700+ lines and mixes auth, chat, email, research, build and admin - consider splitting into routers."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_build_truncation.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_auth_access.py",
+    "/app/backend/tests/conftest.py"
+  ],
+  "success_rate": {"backend": "96% (44/46 pytest cases; async build plumbing 100%)", "frontend": "90% (full Builder flow works; preview iframe blank)"},
+  "seed_data_creation": "Seeded (and purged) super-admin + regular-user sessions in test_database via mongosh/pymongo per /app/memory/test_credentials.md; one frontend session token TEST_fe_1788537332920 (deleted). 0 leftover TEST docs verified.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "/app/memory/test_credentials.md is accurate; Mongo-seeded session token works as both Bearer header and secure httpOnly cookie 'session_token'. Playwright: page.context.add_cookies([{name:'session_token',value:tok,domain:'jarvis-os-52.preview.emergentagent.com',path:'/',secure:True,httpOnly:True,sameSite:'None'}]) then goto -> logged in as super admin.",
+  "context_for_next_testing_agent": "The 502 P0 is fixed and does not need re-verification beyond one smoke run. conftest.py now exposes poll_build(client, base_url, app_id, timeout) - use it for any build test. Two builds run per pytest session (one in backend_test.py::TestBuildAndStats, one in test_build_truncation.py::TestBuildAsyncJob), each ~60-90s; the suite takes ~96s under -n 2. Remaining open items are LLM output quality: (a) blank preview iframe due to untranspiled JSX (verify by reading db.apps preview_html for '<script>' + 'ReactDOM' and no 'babel', and by asserting iframe body innerText length > 20), (b) intermittent backend-agent truncation (assert backend/requirements.txt + backend/.env.example exist and server.py tail is syntactically closed).",
+  "rca_of_the_issue": "502 RCA (now fixed): build was synchronous and took ~60-62s vs the 60s ingress limit; POST now inserts a doc with status='running', spawns asyncio.create_task(_run_build) and returns in ~0.1s while the client polls GET /api/apps/{id} every 3s - measured 0.14s POST + 83s to 'done'. Blank-preview RCA: the Preview agent's prompt allows 'CDN libs OK', so gpt-5.4 emits React UMD + raw JSX in a plain <script>; browsers cannot parse JSX, the script throws SyntaxError, #root stays empty and the iframe shows a white panel. The truncation guard only inspects for '</html>', which is present, so no retry is triggered."
+}

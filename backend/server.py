@@ -6,7 +6,10 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 import os
+import io
 import uuid
+import zipfile
+import asyncio
 import logging
 import requests
 
@@ -304,34 +307,214 @@ async def research(req: ResearchRequest, user: dict = Depends(get_current_user))
 
 def _extract_html(raw: str) -> str:
     import re
-    fence = re.search(r"```(?:html)?\s*(<!DOCTYPE html.*?</html>)\s*```", raw,
+    txt = raw.strip()
+    fence = re.search(r"```(?:html)?\s*(<!DOCTYPE html.*?</html>)\s*```", txt,
                       re.DOTALL | re.IGNORECASE)
     if fence:
         return fence.group(1).strip()
-    doc = re.search(r"(<!DOCTYPE html.*?</html>)", raw, re.DOTALL | re.IGNORECASE)
+    doc = re.search(r"(<!DOCTYPE html.*?</html>)", txt, re.DOTALL | re.IGNORECASE)
     if doc:
         return doc.group(1).strip()
-    return raw.strip()
+    # strip a leading/trailing code fence if present
+    if txt.startswith("```"):
+        txt = re.sub(r"^```[a-zA-Z]*\n", "", txt)
+        txt = txt.rsplit("```", 1)[0]
+    low = txt.lower()
+    start = low.find("<!doctype html")
+    if start == -1:
+        start = low.find("<html")
+    if start > 0:
+        txt = txt[start:]
+        low = txt.lower()
+    # auto-close a truncated document so the preview still renders
+    if ("<!doctype html" in low or "<html" in low) and "</html>" not in low:
+        if "</body>" not in low:
+            txt += "\n</body>"
+        txt += "\n</html>"
+    return txt.strip()
+
+
+def _parse_files(raw: str) -> List[dict]:
+    import re
+    files = []
+    seen = set()
+    for m in re.finditer(r"===\s*(.+?)\s*===\s*```[a-zA-Z0-9.+-]*\n(.*?)```", raw, re.DOTALL):
+        path, code = m.group(1).strip(), m.group(2).strip()
+        if path and code and path not in seen:
+            files.append({"path": path, "content": code}); seen.add(path)
+    # tolerate a final UNTERMINATED code block (truncated output): scan from the LAST marker
+    markers = list(re.finditer(r"===\s*(.+?)\s*===\s*```[a-zA-Z0-9.+-]*\n", raw))
+    if markers:
+        last = markers[-1]
+        path = last.group(1).strip()
+        code = raw[last.end():]
+        # only accept if this block was NOT already terminated/captured above
+        if path and path not in seen and "```" not in code and code.strip():
+            files.append({"path": path, "content": code.strip()})
+    return files
+
+
+def _sanitize_path(path: str) -> str:
+    """Prevent zip-slip: strip leading slashes and any '..' traversal segments."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    return "/".join(parts)
+
+
+def _dedupe_files(files: List[dict]) -> List[dict]:
+    seen, out = set(), []
+    for f in files:
+        p = _sanitize_path(f.get("path", ""))
+        if p and p not in seen:
+            f["path"] = p
+            out.append(f)
+            seen.add(p)
+    return out
+
+
+DEFAULT_FRONTEND_DOCKERFILE = (
+    "FROM node:20-alpine\n"
+    "WORKDIR /app\n"
+    "COPY package.json ./\n"
+    "RUN yarn install\n"
+    "COPY . .\n"
+    "EXPOSE 3000\n"
+    'CMD ["yarn", "start"]\n'
+)
+
+
+def _is_truncated_html(raw: str) -> bool:
+    return "</html>" not in (raw or "").lower()
+
+
+def _bad_preview(raw: str) -> bool:
+    """A preview is unusable if truncated OR if it uses JSX/React without a transpiler."""
+    if _is_truncated_html(raw):
+        return True
+    low = (raw or "").lower()
+    uses_react = ("reactdom" in low) or ("react-dom" in low) or ("createroot" in low)
+    has_babel = "babel" in low
+    return uses_react and not has_babel
+
+
+FILE_FMT = ("Output EACH file STRICTLY as:\n=== relative/path/file.ext ===\n"
+            "```lang\n<code>\n```\nRepeat for every file. No prose outside the blocks.")
+
+_BUILD_TASKS: set = set()
 
 
 @api_router.post("/build")
 async def build(req: BuildRequest, user: dict = Depends(get_current_user)):
-    system = ("You are an elite full-stack engineer. Build a COMPLETE, production-quality, "
-              "SELF-CONTAINED single-file web app as ONE HTML document with inline <style> and "
-              "<script> (vanilla JS, no build step). It must actually WORK: real interactivity, "
-              "sensible sample data, polished modern responsive UI. You MAY use CDN links "
-              "(Tailwind CDN, Chart.js, font CDNs). Return ONLY the HTML from <!DOCTYPE html> "
-              "to </html>. No commentary.")
+    # ---- refine path: iterate on the existing live preview ----
     if req.refine and req.current_html:
-        user_text = (f"Current app:\n```html\n{req.current_html[:6000]}\n```\n\n"
-                     f"Apply this change and return the full updated HTML:\n{req.refine}")
-    else:
-        user_text = f"App idea: {req.idea}\n\nBuild the full working app now."
-    html = _extract_html(await llm(system, user_text, max_tokens=4000))
-    doc = {"id": str(uuid.uuid4()), "user_id": user["user_id"], "idea": req.idea,
-           "html": html, "created_at": datetime.now(timezone.utc)}
-    await db.apps.insert_one(dict(doc))
-    return {"html": html, "id": doc["id"]}
+        html = _extract_html(await llm(
+            "You are an elite engineer. Return ONLY the full updated HTML document.",
+            f"Current app:\n```html\n{req.current_html[:6000]}\n```\n\n"
+            f"Apply this change and return the full HTML:\n{req.refine}", max_tokens=4000))
+        return {"plan": "", "files": [], "preview_html": html}
+
+    idea = req.idea
+    app_id = str(uuid.uuid4())
+    await db.apps.insert_one({
+        "id": app_id, "user_id": user["user_id"], "idea": idea, "status": "running",
+        "plan": "", "files": [], "preview_html": "", "html": "",
+        "created_at": datetime.now(timezone.utc)})
+    task = asyncio.create_task(_run_build(app_id, user["user_id"], idea))
+    _BUILD_TASKS.add(task)
+    task.add_done_callback(_BUILD_TASKS.discard)
+    return {"id": app_id, "status": "running",
+            "agents": ["Architect", "Backend", "Frontend", "DevOps", "Preview"]}
+
+
+async def _run_build(app_id: str, user_id: str, idea: str):
+    try:
+        plan = await llm(
+            "You are a senior software ARCHITECT. Produce a crisp production spec for a FULL-STACK "
+            "app: purpose, features, tech stack (React + FastAPI + MongoDB), data models, and API "
+            "endpoints. Be concrete and concise.", f"App idea: {idea}", max_tokens=1500)
+        ctx = f"App idea: {idea}\n\nArchitecture spec:\n{plan}"
+        backend_sys = ("You are a BACKEND engineer. Write a COMPLETE production FastAPI backend. "
+                       "ALWAYS include backend/server.py (FastAPI, routes under /api, Motor/MongoDB, "
+                       "Pydantic models, CORS), backend/requirements.txt and backend/.env.example. "
+                       "Every backend file under a 'backend/' prefix. Real logic, no TODOs. " + FILE_FMT)
+        frontend_sys = ("You are a FRONTEND engineer. Write a COMPLETE React frontend. ALWAYS include "
+                        "frontend/src/App.js, frontend/src/api.js (env base URL) and "
+                        "frontend/package.json. Every frontend file under a 'frontend/' prefix. "
+                        "Real components with state and fetch calls. " + FILE_FMT)
+        devops_sys = ("You are a DEVOPS engineer. Produce README.md (overview, setup, run), a root "
+                      "docker-compose.yml wiring frontend + backend + mongo, plus backend/Dockerfile "
+                      "and frontend/Dockerfile (paths match backend/ and frontend/). " + FILE_FMT)
+        preview_sys = ("You are a FRONTEND engineer. Build a COMPLETE self-contained SINGLE-FILE "
+                       "working demo as ONE HTML document. Use ONLY vanilla HTML, inline CSS, and "
+                       "plain vanilla JavaScript (DOM APIs) with in-memory sample data. ABSOLUTELY "
+                       "NO React, JSX, Vue, Angular, or any library that needs a build/transpile "
+                       "step; NEVER use <script type='text/babel'>. Small pure-JS CDN utilities are "
+                       "fine. Keep it compact so it fits, and ALWAYS finish with </body></html>. "
+                       "Return ONLY the HTML from <!DOCTYPE html> to </html>.")
+        be, fe, ops, prev = await asyncio.gather(
+            llm(backend_sys, ctx, max_tokens=8000),
+            llm(frontend_sys, ctx, max_tokens=8000),
+            llm(devops_sys, ctx, max_tokens=2500),
+            llm(preview_sys, ctx, max_tokens=7000),
+            return_exceptions=True)
+
+        def _safe(x):
+            return "" if isinstance(x, Exception) else x
+
+        files = _parse_files(_safe(be)) + _parse_files(_safe(fe)) + _parse_files(_safe(ops))
+        files = _dedupe_files(files)
+        if not any(f["path"].lower().endswith("readme.md") for f in files):
+            files.insert(0, {"path": "README.md", "content": f"# {idea}\n\n{plan}\n"})
+        files.insert(0, {"path": "ARCHITECTURE.md", "content": plan})
+        # ensure a frontend/Dockerfile exists when docker-compose references it
+        has_compose = any("docker-compose" in f["path"].lower() for f in files)
+        if has_compose and not any(f["path"] == "frontend/Dockerfile" for f in files):
+            files.append({"path": "frontend/Dockerfile", "content": DEFAULT_FRONTEND_DOCKERFILE})
+        files = _dedupe_files(files)
+
+        # preview: retry if truncated OR if it uses JSX/React without a transpiler (blank iframe)
+        prev_raw = _safe(prev)
+        if _bad_preview(prev_raw):
+            lean_sys = (preview_sys + " CRITICAL: keep it MINIMAL — a single screen with a tiny "
+                        "sample dataset — and use VANILLA JavaScript ONLY (no frameworks/JSX) so it "
+                        "runs directly in a browser and fits in full, ending with </body></html>.")
+            retry = _safe(await llm(lean_sys, ctx + "\n\nKeep the demo very compact, vanilla JS only.",
+                                    max_tokens=6000))
+            if not _bad_preview(retry):
+                prev_raw = retry
+        preview_html = _extract_html(prev_raw) or "<!DOCTYPE html><html><body><h1>Preview unavailable</h1></body></html>"
+        await db.apps.update_one({"id": app_id}, {"$set": {
+            "status": "done", "plan": plan, "files": files,
+            "preview_html": preview_html, "html": preview_html}})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("build error")
+        await db.apps.update_one({"id": app_id}, {"$set": {"status": "error", "error": str(exc)}})
+
+
+@api_router.get("/apps/{app_id}")
+async def get_app(app_id: str, user: dict = Depends(get_current_user)):
+    doc = await db.apps.find_one({"user_id": user["user_id"], "id": app_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="App not found")
+    return {"id": doc["id"], "status": doc.get("status", "done"), "idea": doc.get("idea", ""),
+            "plan": doc.get("plan", ""), "files": doc.get("files", []),
+            "preview_html": doc.get("preview_html", ""), "error": doc.get("error", "")}
+
+
+@api_router.get("/apps/{app_id}/zip")
+async def app_zip(app_id: str, user: dict = Depends(get_current_user)):
+    from fastapi.responses import StreamingResponse
+    doc = await db.apps.find_one({"user_id": user["user_id"], "id": app_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="App not found")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in doc.get("files", []):
+            zf.writestr(f["path"], f["content"])
+        if doc.get("preview_html"):
+            zf.writestr("preview/index.html", doc["preview_html"])
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip",
+                             headers={"Content-Disposition": 'attachment; filename="jarvis-app.zip"'})
 
 
 @api_router.get("/history/apps")

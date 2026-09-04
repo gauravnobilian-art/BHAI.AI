@@ -15,6 +15,8 @@ PROTECTED = [
     ("GET", "/api/history/chat", None),
     ("POST", "/api/email", {"context": "hi"}),
     ("POST", "/api/build", {"idea": "todo app"}),
+    ("GET", "/api/apps/does-not-exist/zip", None),
+    ("GET", "/api/apps/does-not-exist", None),
     ("GET", "/api/history/emails", None),
     ("GET", "/api/history/apps", None),
 ]
@@ -100,3 +102,31 @@ class TestAuthMeRegular:
         assert d["email"] == regular_user["email"]
         assert d["role"] == "user"
         assert d["is_admin"] is False
+
+
+# --- GET /api/apps/{id} ownership scoping (async build polling endpoint) ---
+class TestAppPollScoping:
+    def test_get_app_is_scoped_to_owner(self, regular_user, super_admin, mongo):
+        from datetime import datetime, timezone
+        app_id = f"TEST_{uuid.uuid4().hex}"
+        mongo.apps.insert_one({"id": app_id, "user_id": regular_user["user_id"],
+                               "idea": "TEST scoping", "status": "done", "plan": "p",
+                               "files": [{"path": "a.txt", "content": "hello"}],
+                               "preview_html": "<!DOCTYPE html><html></html>",
+                               "created_at": datetime.now(timezone.utc)})
+        try:
+            own = regular_user["client"].get(f"{BASE_URL}/api/apps/{app_id}", timeout=60)
+            assert own.status_code == 200, own.text[:200]
+            d = own.json()
+            assert d["status"] == "done"
+            assert d["files"][0]["path"] == "a.txt"
+            assert "_id" not in d
+
+            other = super_admin["client"].get(f"{BASE_URL}/api/apps/{app_id}", timeout=60)
+            assert other.status_code == 404, other.status_code
+
+            unknown = regular_user["client"].get(
+                f"{BASE_URL}/api/apps/{uuid.uuid4()}", timeout=60)
+            assert unknown.status_code == 404, unknown.status_code
+        finally:
+            mongo.apps.delete_many({"id": app_id})

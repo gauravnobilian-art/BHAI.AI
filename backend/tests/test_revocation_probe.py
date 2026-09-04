@@ -1,12 +1,8 @@
-"""Probe: what happens to an existing session after the user is removed from the allow-list?
-
-Documents observed behaviour (revocation gap) rather than asserting a desired one; the
-result is reported to the developer agent.
-"""
+"""Revocation: removing a user from the allow-list must invalidate existing sessions."""
 from conftest import BASE_URL
 
 
-def test_revoked_user_session_behaviour(regular_user, mongo, record_property):
+def test_revoked_user_session_is_rejected(regular_user, mongo):
     c = regular_user["client"]
     assert c.get(f"{BASE_URL}/api/stats", timeout=30).status_code == 200
 
@@ -17,8 +13,8 @@ def test_revoked_user_session_behaviour(regular_user, mongo, record_property):
     stats = c.get(f"{BASE_URL}/api/stats", timeout=30)
     chat = c.post(f"{BASE_URL}/api/chat",
                   json={"messages": [{"role": "user", "content": "hi"}]}, timeout=120)
-    record_property("revoked_auth_me", f"{me.status_code} {me.text[:120]}")
-    record_property("revoked_stats", str(stats.status_code))
-    record_property("revoked_chat", str(chat.status_code))
-    print("REVOKED -> /auth/me:", me.status_code, me.text[:200])
-    print("REVOKED -> /stats:", stats.status_code, "/chat:", chat.status_code)
+    print("REVOKED -> /auth/me:", me.status_code, "/stats:", stats.status_code,
+          "/chat:", chat.status_code)
+    assert me.status_code == 403, f"/auth/me -> {me.status_code}: {me.text[:200]}"
+    assert stats.status_code == 403, f"/stats -> {stats.status_code}"
+    assert chat.status_code == 403, f"/chat -> {chat.status_code}"

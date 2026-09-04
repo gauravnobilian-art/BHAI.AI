@@ -280,49 +280,110 @@ function BuildTab() {
   const [idea, setIdea] = useState(""); const [refine, setRefine] = useState("");
   const [html, setHtml] = useState(""); const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(""); const [apps, setApps] = useState([]);
+  const [plan, setPlan] = useState(""); const [files, setFiles] = useState([]);
+  const [appId, setAppId] = useState(""); const [openFile, setOpenFile] = useState(null);
+  const AGENTS = ["Architect", "Backend", "Frontend", "DevOps", "Preview"];
   const load = useCallback(() => http.get("/history/apps").then(({ data }) => setApps(data.apps || [])).catch(() => {}), []);
   useEffect(() => { load(); }, [load]);
 
   const build = async () => {
-    if (!idea.trim() || loading) return; setLoading(true); setErr("");
-    try { const { data } = await http.post("/build", { idea }); setHtml(data.html); load(); }
-    catch { setErr("⚠️ Build failed — please try again."); }
+    if (!idea.trim() || loading) return; setLoading(true); setErr(""); setFiles([]); setPlan(""); setHtml("");
+    try {
+      const { data } = await http.post("/build", { idea });
+      const id = data.id; setAppId(id);
+      let done = false;
+      for (let i = 0; i < 100 && !done; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try {
+          const { data: st } = await http.get(`/apps/${id}`);
+          if (st.status === "done") {
+            setHtml(st.preview_html); setPlan(st.plan || ""); setFiles(st.files || []); load(); done = true;
+          } else if (st.status === "error") {
+            setErr("⚠️ Build failed — " + (st.error || "please try again.")); done = true;
+          }
+        } catch { /* keep polling on transient errors */ }
+      }
+      if (!done) setErr("⚠️ Build is taking longer than expected — check your project history shortly.");
+    } catch { setErr("⚠️ Build failed — please try again."); }
     finally { setLoading(false); }
   };
   const applyRefine = async () => {
     if (!refine.trim() || loading) return; setLoading(true); setErr("");
-    try { const { data } = await http.post("/build", { idea, refine, current_html: html }); setHtml(data.html); setRefine(""); load(); }
+    try { const { data } = await http.post("/build", { idea, refine, current_html: html }); setHtml(data.preview_html); setRefine(""); }
     catch { setErr("⚠️ Update failed — please try again."); }
     finally { setLoading(false); }
   };
-  const download = () => { const b = new Blob([html], { type: "text/html" }); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "index.html"; a.click(); };
+  const downloadZip = () => {
+    window.open(`${API}/apps/${appId}/zip`, "_blank");
+  };
+  const downloadHtml = () => { const b = new Blob([html], { type: "text/html" }); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "index.html"; a.click(); };
 
   return (
     <div data-testid="build-tab">
-      <textarea data-testid="build-idea" className="jv-textarea" style={{ minHeight: 80 }} placeholder="Describe an app — e.g. a habit tracker with streaks, charts and dark mode" value={idea} onChange={(e) => setIdea(e.target.value)} />
-      <div style={{ marginTop: ".8rem" }}><button data-testid="build-run" className="jv-btn" onClick={build} disabled={loading}>{loading ? <Spinner /> : <Rocket size={16} />} Build it live</button></div>
+      <div className="jv-card" style={{ padding: "1rem 1.2rem", marginBottom: "1rem" }}>
+        <div className="jv-mono jv-muted" style={{ fontSize: ".78rem", marginBottom: ".3rem" }}>MULTI-AGENT FULL-STACK BUILDER</div>
+        <div className="jv-muted">Architect, Backend, Frontend & DevOps agents build a complete, production-ready project — with a live preview.</div>
+      </div>
+      <textarea data-testid="build-idea" className="jv-textarea" style={{ minHeight: 80 }} placeholder="Describe a full-stack app — e.g. a task manager with auth, projects, and a dashboard" value={idea} onChange={(e) => setIdea(e.target.value)} />
+      <div style={{ marginTop: ".8rem" }}><button data-testid="build-run" className="jv-btn" onClick={build} disabled={loading}>{loading ? <Spinner /> : <Rocket size={16} />} Build full-stack app</button></div>
+
+      {loading && (
+        <div className="jv-card" style={{ padding: "1rem", marginTop: "1rem" }}>
+          <div className="jv-mono jv-muted" style={{ fontSize: ".78rem", marginBottom: ".5rem" }}>AGENTS WORKING IN PARALLEL…</div>
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+            {AGENTS.map((a) => <span key={a} className="jv-chip" style={{ display: "inline-flex", alignItems: "center", gap: ".35rem" }}><Zap size={12} /> {a}</span>)}
+          </div>
+        </div>
+      )}
       {err && <div data-testid="build-error" style={{ color: "var(--red-2)", marginTop: ".8rem" }}>{err}</div>}
+
       {html && (
         <>
           <div className="jv-card" style={{ marginTop: "1rem", overflow: "hidden" }}>
-            <div style={{ padding: ".6rem 1rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <strong>Live Preview</strong><button className="jv-btn jv-btn-ghost" onClick={download}><Download size={16} /> index.html</button>
+            <div style={{ padding: ".6rem 1rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
+              <strong>Live Preview</strong>
+              <div style={{ display: "flex", gap: ".5rem" }}>
+                {appId && <button data-testid="build-zip" className="jv-btn" onClick={downloadZip}><Download size={16} /> Download project (.zip)</button>}
+                <button className="jv-btn jv-btn-ghost" onClick={downloadHtml}><Download size={16} /> index.html</button>
+              </div>
             </div>
             <iframe data-testid="build-preview" title="preview" srcDoc={html} sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-modals" style={{ width: "100%", height: 520, border: "none", background: "#fff" }} />
           </div>
           <div style={{ display: "flex", gap: ".6rem", marginTop: ".8rem" }}>
-            <input data-testid="build-refine" className="jv-input" placeholder="Refine — add a dark mode toggle and a chart" value={refine} onChange={(e) => setRefine(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyRefine()} />
+            <input data-testid="build-refine" className="jv-input" placeholder="Refine the preview — add a dark mode toggle and a chart" value={refine} onChange={(e) => setRefine(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyRefine()} />
             <button data-testid="build-refine-btn" className="jv-btn" onClick={applyRefine} disabled={loading}>{loading ? <Spinner /> : <Wand2 size={16} />} Apply</button>
           </div>
         </>
       )}
+
+      {plan && (
+        <details className="jv-card" style={{ padding: "1rem 1.2rem", marginTop: "1rem" }}>
+          <summary style={{ cursor: "pointer", fontWeight: 700 }}>📐 Architecture spec</summary>
+          <pre style={{ whiteSpace: "pre-wrap", marginTop: ".6rem", fontSize: ".85rem", fontFamily: "'Rajdhani',monospace" }}>{plan}</pre>
+        </details>
+      )}
+
+      {files.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <div className="jv-mono jv-muted" style={{ marginBottom: ".5rem", fontSize: ".8rem" }} data-testid="build-filecount">PROJECT FILES ({files.length})</div>
+          {files.map((f) => (
+            <div key={f.path} className="jv-card" style={{ marginBottom: ".4rem" }}>
+              <div onClick={() => setOpenFile(openFile === f.path ? null : f.path)} style={{ padding: ".55rem .9rem", cursor: "pointer", display: "flex", justifyContent: "space-between", fontFamily: "'Rajdhani',monospace" }}>
+                <span>📄 {f.path}</span><span className="jv-muted">{openFile === f.path ? "▲" : "▼"}</span>
+              </div>
+              {openFile === f.path && <pre style={{ margin: 0, padding: ".8rem 1rem", borderTop: "1px solid var(--border)", overflowX: "auto", fontSize: ".8rem" }}>{f.content}</pre>}
+            </div>
+          ))}
+        </div>
+      )}
+
       {apps.length > 0 && (
         <div style={{ marginTop: "1.2rem" }}>
           <div className="jv-muted jv-mono" style={{ marginBottom: ".5rem" }}>YOUR APPS ({apps.length})</div>
           {apps.map((a) => (
             <div key={a.id} className="jv-card" style={{ padding: ".7rem 1rem", marginBottom: ".5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span>{a.idea.slice(0, 70)}</span>
-              <button className="jv-btn jv-btn-ghost" onClick={() => { setHtml(a.html); setIdea(a.idea); }}>Open</button>
+              <button className="jv-btn jv-btn-ghost" onClick={() => window.open(`${API}/apps/${a.id}/zip`, "_blank")}><Download size={15} /> .zip</button>
             </div>
           ))}
         </div>
