@@ -30,7 +30,7 @@ SESSION_API = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-d
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
-app = FastAPI(title="Jarvis")
+app = FastAPI(title="Bhai.AI")
 api_router = APIRouter(prefix="/api")
 
 
@@ -196,6 +196,7 @@ class BuildRequest(BaseModel):
     idea: str
     refine: str = ""
     current_html: str = ""
+    models: dict = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -204,7 +205,7 @@ class BuildRequest(BaseModel):
 
 @api_router.get("/")
 async def root():
-    return {"message": "Jarvis API", "ai": bool(EMERGENT_LLM_KEY)}
+    return {"message": "Bhai.AI API", "ai": bool(EMERGENT_LLM_KEY)}
 
 
 @app.get("/health")
@@ -381,6 +382,58 @@ DEFAULT_FRONTEND_DOCKERFILE = (
     'CMD ["yarn", "start"]\n'
 )
 
+DEFAULT_BACKEND_DOCKERFILE = (
+    "FROM python:3.11-slim\n"
+    "WORKDIR /app\n"
+    "COPY requirements.txt ./\n"
+    "RUN pip install --no-cache-dir -r requirements.txt\n"
+    "COPY . .\n"
+    "EXPOSE 8001\n"
+    'CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001"]\n'
+)
+
+DEFAULT_REQUIREMENTS = (
+    "fastapi>=0.110\nuvicorn[standard]>=0.29\nmotor>=3.4\n"
+    "pydantic>=2.6\npython-dotenv>=1.0\n"
+)
+
+DEFAULT_BACKEND_ENV = "MONGO_URL=mongodb://mongo:27017\nDB_NAME=app_database\n"
+
+DEFAULT_COMPOSE = (
+    "version: '3.8'\n"
+    "services:\n"
+    "  mongo:\n"
+    "    image: mongo:7\n"
+    "    ports: ['27017:27017']\n"
+    "  backend:\n"
+    "    build: ./backend\n"
+    "    env_file: ./backend/.env\n"
+    "    ports: ['8001:8001']\n"
+    "    depends_on: [mongo]\n"
+    "  frontend:\n"
+    "    build: ./frontend\n"
+    "    ports: ['3000:3000']\n"
+    "    depends_on: [backend]\n"
+)
+
+
+def _ensure_scaffold(files: List[dict], idea: str, plan: str) -> List[dict]:
+    """Guarantee a runnable project: inject any essential file the agents omitted."""
+    have = {f["path"] for f in files}
+    essentials = [
+        ("backend/requirements.txt", DEFAULT_REQUIREMENTS),
+        ("backend/.env.example", DEFAULT_BACKEND_ENV),
+        ("docker-compose.yml", DEFAULT_COMPOSE),
+        ("backend/Dockerfile", DEFAULT_BACKEND_DOCKERFILE),
+        ("frontend/Dockerfile", DEFAULT_FRONTEND_DOCKERFILE),
+    ]
+    for path, content in essentials:
+        if path not in have:
+            files.append({"path": path, "content": content})
+    if not any(f["path"].lower().endswith("readme.md") for f in files):
+        files.append({"path": "README.md", "content": f"# {idea}\n\n{plan}\n"})
+    return _dedupe_files(files)
+
 
 def _is_truncated_html(raw: str) -> bool:
     return "</html>" not in (raw or "").lower()
@@ -401,6 +454,62 @@ FILE_FMT = ("Output EACH file STRICTLY as:\n=== relative/path/file.ext ===\n"
 
 _BUILD_TASKS: set = set()
 
+# ------------------------- Multi-agent team config ------------------------- #
+MODELS = [
+    {"id": "gpt-5.4", "provider": "openai", "name": "OpenAI GPT-5.4", "badge": "Balanced"},
+    {"id": "gpt-5.4-mini", "provider": "openai", "name": "OpenAI GPT-5.4 Mini", "badge": "Fast"},
+    {"id": "gpt-5.5", "provider": "openai", "name": "OpenAI GPT-5.5", "badge": "Powerful"},
+    {"id": "claude-sonnet-4-6", "provider": "anthropic", "name": "Claude Sonnet 4.6", "badge": "High Precision"},
+    {"id": "claude-haiku-4-5-20251001", "provider": "anthropic", "name": "Claude Haiku 4.5", "badge": "Fast"},
+    {"id": "claude-opus-4-6", "provider": "anthropic", "name": "Claude Opus 4.6", "badge": "Elite"},
+]
+MODEL_PROVIDER = {m["id"]: m["provider"] for m in MODELS}
+MODEL_IDS = {m["id"] for m in MODELS}
+
+AGENTS_CFG = [
+    {"id": "architect", "name": "Naksi Bhai", "role": "Architect", "icon": "Compass",
+     "default_model": "gpt-5.4", "desc": "System architecture, stack, API contracts"},
+    {"id": "database", "name": "Khatiyan Bhai", "role": "Database", "icon": "Database",
+     "default_model": "gpt-5.4", "desc": "Schemas, data models, indexes, seed data"},
+    {"id": "backend", "name": "Kariya Bhai", "role": "Backend", "icon": "Server",
+     "default_model": "claude-sonnet-4-6", "desc": "FastAPI routes, business logic, auth"},
+    {"id": "frontend", "name": "Chhotu Bhai", "role": "Frontend", "icon": "Code2",
+     "default_model": "claude-sonnet-4-6", "desc": "React components, state, hooks, fetch"},
+    {"id": "designer", "name": "Rangi Bhai", "role": "Designer", "icon": "Palette",
+     "default_model": "gpt-5.4", "desc": "Design system, Tailwind theme, styling"},
+    {"id": "devops", "name": "Mistry Bhai", "role": "DevOps", "icon": "Terminal",
+     "default_model": "claude-sonnet-4-6", "desc": "Docker, compose, env, run scripts"},
+    {"id": "preview", "name": "Pradarshan Bhai", "role": "Preview", "icon": "MonitorPlay",
+     "default_model": "claude-sonnet-4-6", "desc": "Live single-file interactive preview"},
+    {"id": "qa", "name": "Jaanch Bhai", "role": "QA/Tester", "icon": "CheckCircle2",
+     "default_model": "gpt-5.4", "desc": "Review, repair, e2e tests, verification"},
+]
+AGENT_IDS = [a["id"] for a in AGENTS_CFG]
+
+
+def _resolve_model(models: dict, agent_id: str) -> tuple:
+    default = next(a["default_model"] for a in AGENTS_CFG if a["id"] == agent_id)
+    mid = models.get(agent_id, default)
+    if mid not in MODEL_IDS:
+        mid = default
+    return MODEL_PROVIDER[mid], mid
+
+
+async def _set_agent(app_id: str, aid: str, **fields):
+    setter = {f"agents.$[a].{k}": v for k, v in fields.items()}
+    await db.apps.update_one({"id": app_id}, {"$set": setter}, array_filters=[{"a.id": aid}])
+    doc = await db.apps.find_one({"id": app_id}, {"_id": 0, "agents": 1})
+    if doc and doc.get("agents"):
+        ags = doc["agents"]
+        done = sum(1 for a in ags if a.get("status") in ("done", "error"))
+        await db.apps.update_one({"id": app_id},
+                                 {"$set": {"progress": int(done / len(ags) * 100)}})
+
+
+@api_router.get("/models")
+async def list_models(_: dict = Depends(get_current_user)):
+    return {"models": MODELS, "agents": AGENTS_CFG}
+
 
 @api_router.post("/build")
 async def build(req: BuildRequest, user: dict = Depends(get_current_user)):
@@ -414,76 +523,128 @@ async def build(req: BuildRequest, user: dict = Depends(get_current_user)):
 
     idea = req.idea
     app_id = str(uuid.uuid4())
+    agents = [{
+        "id": a["id"], "name": a["name"], "role": a["role"], "icon": a["icon"],
+        "desc": a["desc"], "model": _resolve_model(req.models, a["id"])[1],
+        "status": "queued", "contribution": "",
+    } for a in AGENTS_CFG]
     await db.apps.insert_one({
         "id": app_id, "user_id": user["user_id"], "idea": idea, "status": "running",
-        "plan": "", "files": [], "preview_html": "", "html": "",
-        "created_at": datetime.now(timezone.utc)})
-    task = asyncio.create_task(_run_build(app_id, user["user_id"], idea))
+        "progress": 0, "agents": agents, "plan": "", "files": [],
+        "preview_html": "", "html": "", "created_at": datetime.now(timezone.utc)})
+    task = asyncio.create_task(_run_build(app_id, idea, req.models))
     _BUILD_TASKS.add(task)
     task.add_done_callback(_BUILD_TASKS.discard)
-    return {"id": app_id, "status": "running",
-            "agents": ["Architect", "Backend", "Frontend", "DevOps", "Preview"]}
+    return {"id": app_id, "status": "running", "agents": agents}
 
 
-async def _run_build(app_id: str, user_id: str, idea: str):
+async def _run_build(app_id: str, idea: str, models: dict):
     try:
+        # ---- Phase 1: Architect (spec everyone else depends on) ----
+        await _set_agent(app_id, "architect", status="working")
+        ap, am = _resolve_model(models, "architect")
         plan = await llm(
-            "You are a senior software ARCHITECT. Produce a crisp production spec for a FULL-STACK "
-            "app: purpose, features, tech stack (React + FastAPI + MongoDB), data models, and API "
-            "endpoints. Be concrete and concise.", f"App idea: {idea}", max_tokens=1500)
+            "You are a senior software ARCHITECT for ENTERPRISE-GRADE apps. Produce a crisp, "
+            "concrete production spec for a FULL-STACK app: purpose, key features, tech stack "
+            "(React + FastAPI + MongoDB), data models, REST API endpoints, and folder structure. "
+            "Be specific and production-minded.", f"App idea: {idea}", ap, am, max_tokens=1800)
+        await _set_agent(app_id, "architect", status="done",
+                         contribution=f"Architecture spec ({len(plan)} chars)")
         ctx = f"App idea: {idea}\n\nArchitecture spec:\n{plan}"
+
+        async def run_files_agent(aid, system, max_tokens, extra_ctx=""):
+            await _set_agent(app_id, aid, status="working")
+            p, m = _resolve_model(models, aid)
+            try:
+                out = await llm(system, ctx + extra_ctx, p, m, max_tokens=max_tokens)
+                fs = _parse_files(out)
+                await _set_agent(app_id, aid, status="done",
+                                 contribution=f"{len(fs)} file(s) generated")
+                return fs
+            except Exception as exc:  # noqa: BLE001
+                await _set_agent(app_id, aid, status="error", contribution=str(exc)[:120])
+                return []
+
+        async def run_preview_agent():
+            await _set_agent(app_id, "preview", status="working")
+            p, m = _resolve_model(models, "preview")
+            preview_sys = ("You are a FRONTEND engineer. Build a COMPLETE self-contained SINGLE-FILE "
+                           "working demo as ONE HTML document. Use ONLY vanilla HTML, inline CSS, and "
+                           "plain vanilla JavaScript (DOM APIs) with in-memory sample data. ABSOLUTELY "
+                           "NO React, JSX, Vue, Angular, or any library that needs a build/transpile "
+                           "step; NEVER use <script type='text/babel'>. Make it look polished and "
+                           "enterprise-grade. Keep it compact so it fits, and ALWAYS finish with "
+                           "</body></html>. Return ONLY the HTML from <!DOCTYPE html> to </html>.")
+            try:
+                prev_raw = await llm(preview_sys, ctx, p, m, max_tokens=7000)
+                if _bad_preview(prev_raw):
+                    lean = (preview_sys + " CRITICAL: keep it MINIMAL — a single screen with a tiny "
+                            "sample dataset — vanilla JS ONLY, ending with </body></html>.")
+                    retry = await llm(lean, ctx + "\n\nKeep the demo very compact, vanilla JS only.",
+                                      p, m, max_tokens=6000)
+                    if not _bad_preview(retry):
+                        prev_raw = retry
+                html = _extract_html(prev_raw)
+                await _set_agent(app_id, "preview", status="done",
+                                 contribution="Interactive live preview ready")
+                return html
+            except Exception as exc:  # noqa: BLE001
+                await _set_agent(app_id, "preview", status="error", contribution=str(exc)[:120])
+                return ""
+
+        database_sys = ("You are a DATABASE engineer. Design the persistence layer. Include "
+                        "backend/models.py (Pydantic + Mongo document models), backend/db.py (Motor "
+                        "client + indexes) and backend/seed.py (sample seed data). Every file under a "
+                        "'backend/' prefix. Real, complete code. " + FILE_FMT)
         backend_sys = ("You are a BACKEND engineer. Write a COMPLETE production FastAPI backend. "
                        "ALWAYS include backend/server.py (FastAPI, routes under /api, Motor/MongoDB, "
-                       "Pydantic models, CORS), backend/requirements.txt and backend/.env.example. "
-                       "Every backend file under a 'backend/' prefix. Real logic, no TODOs. " + FILE_FMT)
+                       "Pydantic models, CORS, real business logic), backend/requirements.txt and "
+                       "backend/.env.example. Every backend file under a 'backend/' prefix. No TODOs. "
+                       + FILE_FMT)
         frontend_sys = ("You are a FRONTEND engineer. Write a COMPLETE React frontend. ALWAYS include "
                         "frontend/src/App.js, frontend/src/api.js (env base URL) and "
-                        "frontend/package.json. Every frontend file under a 'frontend/' prefix. "
-                        "Real components with state and fetch calls. " + FILE_FMT)
+                        "frontend/package.json. Real components with state, hooks and fetch calls. "
+                        "Every frontend file under a 'frontend/' prefix. " + FILE_FMT)
+        designer_sys = ("You are a UI/UX DESIGNER-engineer. Produce the design system: "
+                        "frontend/src/styles/theme.css (CSS variables, typography, buttons, cards) and "
+                        "frontend/tailwind.config.js. Modern, distinctive, accessible. Every file under "
+                        "a 'frontend/' prefix. " + FILE_FMT)
         devops_sys = ("You are a DEVOPS engineer. Produce README.md (overview, setup, run), a root "
                       "docker-compose.yml wiring frontend + backend + mongo, plus backend/Dockerfile "
                       "and frontend/Dockerfile (paths match backend/ and frontend/). " + FILE_FMT)
-        preview_sys = ("You are a FRONTEND engineer. Build a COMPLETE self-contained SINGLE-FILE "
-                       "working demo as ONE HTML document. Use ONLY vanilla HTML, inline CSS, and "
-                       "plain vanilla JavaScript (DOM APIs) with in-memory sample data. ABSOLUTELY "
-                       "NO React, JSX, Vue, Angular, or any library that needs a build/transpile "
-                       "step; NEVER use <script type='text/babel'>. Small pure-JS CDN utilities are "
-                       "fine. Keep it compact so it fits, and ALWAYS finish with </body></html>. "
-                       "Return ONLY the HTML from <!DOCTYPE html> to </html>.")
-        be, fe, ops, prev = await asyncio.gather(
-            llm(backend_sys, ctx, max_tokens=8000),
-            llm(frontend_sys, ctx, max_tokens=8000),
-            llm(devops_sys, ctx, max_tokens=2500),
-            llm(preview_sys, ctx, max_tokens=7000),
-            return_exceptions=True)
 
-        def _safe(x):
-            return "" if isinstance(x, Exception) else x
+        db_files, be, fe, dz, ops, preview_html = await asyncio.gather(
+            run_files_agent("database", database_sys, 4000),
+            run_files_agent("backend", backend_sys, 8000),
+            run_files_agent("frontend", frontend_sys, 8000),
+            run_files_agent("designer", designer_sys, 3500),
+            run_files_agent("devops", devops_sys, 2500),
+            run_preview_agent())
 
-        files = _parse_files(_safe(be)) + _parse_files(_safe(fe)) + _parse_files(_safe(ops))
-        files = _dedupe_files(files)
-        if not any(f["path"].lower().endswith("readme.md") for f in files):
-            files.insert(0, {"path": "README.md", "content": f"# {idea}\n\n{plan}\n"})
+        files = _dedupe_files(db_files + be + fe + dz + ops)
         files.insert(0, {"path": "ARCHITECTURE.md", "content": plan})
-        # ensure a frontend/Dockerfile exists when docker-compose references it
-        has_compose = any("docker-compose" in f["path"].lower() for f in files)
-        if has_compose and not any(f["path"] == "frontend/Dockerfile" for f in files):
-            files.append({"path": "frontend/Dockerfile", "content": DEFAULT_FRONTEND_DOCKERFILE})
-        files = _dedupe_files(files)
+        files = _ensure_scaffold(files, idea, plan)
 
-        # preview: retry if truncated OR if it uses JSX/React without a transpiler (blank iframe)
-        prev_raw = _safe(prev)
-        if _bad_preview(prev_raw):
-            lean_sys = (preview_sys + " CRITICAL: keep it MINIMAL — a single screen with a tiny "
-                        "sample dataset — and use VANILLA JavaScript ONLY (no frameworks/JSX) so it "
-                        "runs directly in a browser and fits in full, ending with </body></html>.")
-            retry = _safe(await llm(lean_sys, ctx + "\n\nKeep the demo very compact, vanilla JS only.",
-                                    max_tokens=6000))
-            if not _bad_preview(retry):
-                prev_raw = retry
-        preview_html = _extract_html(prev_raw) or "<!DOCTYPE html><html><body><h1>Preview unavailable</h1></body></html>"
+        # ---- Phase 3: QA reviews the project + writes tests ----
+        await _set_agent(app_id, "qa", status="working")
+        qp, qm = _resolve_model(models, "qa")
+        try:
+            manifest = "\n".join(f"- {f['path']}" for f in files)
+            qa_out = await llm(
+                "You are a QA/TEST engineer. Given the project file manifest and spec, write "
+                "backend/tests/test_api.py (pytest, hitting the /api endpoints) and a concise "
+                "QA_REPORT.md summarising coverage, risks and a verification checklist. " + FILE_FMT,
+                f"{ctx}\n\nGenerated files:\n{manifest}", qp, qm, max_tokens=3000)
+            qa_files = _parse_files(qa_out)
+            files = _dedupe_files(files + qa_files)
+            await _set_agent(app_id, "qa", status="done",
+                             contribution=f"{len(qa_files)} test/report file(s)")
+        except Exception as exc:  # noqa: BLE001
+            await _set_agent(app_id, "qa", status="error", contribution=str(exc)[:120])
+
+        preview_html = preview_html or "<!DOCTYPE html><html><body><h1>Preview unavailable</h1></body></html>"
         await db.apps.update_one({"id": app_id}, {"$set": {
-            "status": "done", "plan": plan, "files": files,
+            "status": "done", "progress": 100, "plan": plan, "files": files,
             "preview_html": preview_html, "html": preview_html}})
     except Exception as exc:  # noqa: BLE001
         logger.exception("build error")
@@ -496,6 +657,7 @@ async def get_app(app_id: str, user: dict = Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="App not found")
     return {"id": doc["id"], "status": doc.get("status", "done"), "idea": doc.get("idea", ""),
+            "progress": doc.get("progress", 0), "agents": doc.get("agents", []),
             "plan": doc.get("plan", ""), "files": doc.get("files", []),
             "preview_html": doc.get("preview_html", ""), "error": doc.get("error", "")}
 
@@ -514,7 +676,7 @@ async def app_zip(app_id: str, user: dict = Depends(get_current_user)):
             zf.writestr("preview/index.html", doc["preview_html"])
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/zip",
-                             headers={"Content-Disposition": 'attachment; filename="jarvis-app.zip"'})
+                             headers={"Content-Disposition": 'attachment; filename="bhai-app.zip"'})
 
 
 @api_router.get("/history/apps")

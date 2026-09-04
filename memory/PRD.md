@@ -41,7 +41,25 @@ so Jarvis was rebuilt natively on React+FastAPI to be usable at the emergent.hos
 ## Test credentials
 None (no auth yet). EMERGENT_LLM_KEY in /app/backend/.env.
 
-## Update 2026-06 — Async Builder + preview fixes (verified)
+## Update 2026-06 (b) — Rebrand to Bhai.AI + 8-agent enterprise builder (verified)
+Renamed **Jarvis → Bhai.AI** (Traditional Bihari theme, "Bhaiya" mascot + logo in /frontend/public).
+Turned the builder into an Emergent-style full-stack CREATOR:
+- **8-agent team** (Architect/Naksi, Database/Khatiyan, Backend/Kariya, Frontend/Chhotu,
+  Designer/Rangi, DevOps/Mistry, Preview/Pradarshan, QA/Jaanch). Architect runs first, then
+  6 agents in parallel, then QA. `GET /api/models` exposes 6 models (OpenAI gpt-5.4/mini/5.5 +
+  Claude sonnet-4-6/haiku-4-5/opus-4-6). `POST /api/build {idea, models:{agentId:modelId}}`.
+- **Live per-agent status + progress**: doc stores `agents[]` (queued→working→done + contribution
+  + model) and `progress` 0-100 via `_set_agent()`; `GET /api/apps/{id}` returns them for polling.
+- **Frontend**: `BuilderProvider` (shared state), `HouseBuild.jsx` (SVG house-construction
+  animation, stages Buniyaad→Deewar→Chhat→Sajaawat→Griha Pravesh mapped to build %),
+  `AgentPanel.jsx` (agent cards + per-agent model picker) shown BOTH as a live Builder
+  side-panel AND a dedicated **Team** tab. Model changes sync across both.
+- **Runnable output guard** `_ensure_scaffold()`: always injects requirements.txt, .env.example,
+  docker-compose.yml, backend/frontend Dockerfiles, README if agents omit them.
+- Verified iteration_8: backend 96% (new pipeline suite 11/11), frontend 100% (rebrand, house
+  animation, live 8-agent status, model sync, non-blank preview, zip, team/chat/research/admin).
+- Known P2/P3 (open): build latency ~100s isolated / >180s for big ideas or concurrent builds;
+  stale 'running' docs not reaped on restart; HUD stats refresh only on mount.
 - `POST /api/build` is now an ASYNC background job: inserts an app doc `status:"running"`,
   spawns `asyncio.create_task(_run_build)` (strong ref kept in `_BUILD_TASKS`), and returns
   `{id, status:"running"}` in ~0.1s. Frontend `build()` polls `GET /api/apps/{id}` every 3s

@@ -1,0 +1,70 @@
+{
+  "summary": "Iteration-8: full verification of the Bhai.AI rebrand + 8-agent build pipeline (backend + frontend). NEW test file /app/backend/tests/test_agents_pipeline.py (11 cases) — ALL PASSED: GET /api/models returns 6 models (gpt-5.4/gpt-5.4-mini/gpt-5.5 = openai, claude-sonnet-4-6/claude-haiku-4-5-20251001/claude-opus-4-6 = anthropic) + exactly 8 agents in order architect,database,backend,frontend,designer,devops,preview,qa each with a valid default_model, name/role/icon/desc; 401 unauthenticated. POST /api/build {idea, models:{backend:'gpt-5.4-mini',frontend:'claude-sonnet-4-6',preview:'gpt-5.4',qa:'gpt-5.4-mini'}} returned HTTP 200 in 0.2s with status 'running' and 8 agents all 'queued' (no 502). Polling: progress was strictly monotonic 0→12→…→100 with intermediate values, EVERY agent observed leaving 'queued' and all 8 ended 'done' with a contribution string and the exact model requested (non-overridden agents kept defaults). Final doc: plan 6k chars, 36-42 unique files (>=30), README.md + backend/ + frontend/ present, preview_html vanilla (no React/JSX-without-babel), single trailing </html>, no 'Preview unavailable' fallback. /zip: valid archive (CRC ok), unique entries, contains preview/index.html and every generated path. Auth scoping: /apps/{id} and /zip → 404 for another user, 401 anonymous. Invalid model id falls back to the agent default. Isolated build wall-time ~100s. Regression suite (backend_test.py, test_auth_access.py, test_admin.py, test_build_truncation.py): 43 passed / 2 failed — both failures are build LATENCY + LLM-output-quality, not plumbing (details below). FRONTEND (seeded super-admin cookie): app boots to Bhai.AI with mascot/Bihari theme; all 8 tabs present (hud, build, team, chat, email, research, image, admin). Team tab shows 8 agent cards with per-agent model selects + top bar 0%/0/0-8 → 100%/0/8-8 after the build; changing backend model in the Team tab instantly reflected in the Builder side-panel (shared BuilderProvider state) and was sent on the build. Builder: idea → submit → HOUSE CONSTRUCTION visual with stage label progressing Buniyaad → Deewar → Chhat → Sajaawat → Griha Pravesh and progress bar 0→100%; side-panel showed all 8 agents transitioning queued→working→done with contributions; on completion the live-preview-iframe rendered a NON-BLANK interactive app (TaskFlow demo, body text present — the iteration-7 blank-preview P1 is FIXED), file-browser-tree listed 36 files, and download-project-zip-button downloaded bhai-app.zip. Chat, Research, Admin allow-list and Home/stats regression all OK; 0 error elements on any screen. All seeded users/sessions/apps purged (0 leftovers).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/build (latency)",
+        "issue": "Build wall time is highly variable and can exceed 180s: isolated simple build = ~100s, but 'a recipe sharing app with ratings' did NOT finish within the 180s poll budget (stuck at progress 87 in the QA phase) and a second concurrent build took 179s. Two concurrent builds roughly double the time (Phase-2 gather issues 6 LLM calls each). Frontend budget is 150 polls x 2.5s = 375s so the UI still completes, but users wait ~3 min and any load spike risks the 'error' path. Suggest trimming QA/max_tokens or streaming per-agent results, and consider a per-build concurrency guard."
+      },
+      {
+        "endpoint": "POST /api/build -> files[] (backend agent)",
+        "issue": "Still intermittent: one build (42 files) emitted NO backend/requirements.txt (and no docker-compose.yml from the DevOps agent) even though both prompts say ALWAYS include them — the shipped zip is not runnable without a dependency manifest. Suggest a post-generation completeness check that injects/re-requests requirements.txt, .env.example and docker-compose.yml when missing."
+      },
+      {
+        "endpoint": "GET /api/apps/{app_id}",
+        "issue": "Still no terminal timeout for stuck 'running' docs (carried over from iteration 7): a backend restart mid-build leaves status='running' forever. Consider marking stale running docs as 'error' on startup."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "AgentPanel model <select>",
+        "issue": "LOW: React console warning on every render — 'In HTML, <span> cannot be a child of <option>' (hydration warning). Comes from the option label content in the per-agent model select; harmless but noisy in the console.",
+        "selector": "[data-testid^=\"per-agent-model-select-\"]",
+        "priority": "LOW"
+      },
+      {
+        "component": "HudTab stats",
+        "issue": "LOW: /api/stats is fetched only on mount, so CHAT MESSAGES / APPS BUILT stay stale after using Chat or finishing a build until the tab is remounted.",
+        "selector": "[data-testid=\"hud-tab\"]",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Builder / Team / Home / Admin",
+        "issues": ["No contrast, spacing or alignment defects found at 1920x1080; house animation, side panel and team grid all align well. Minor: the generated live preview opens on a sign-in gate (demo creds shown inside the preview) so the first frame of the 'interactive app' is a login screen rather than the app itself — consider instructing the Preview agent to render the logged-in main screen directly."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_agents_pipeline.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_build_truncation.py",
+    "/app/test_reports/pytest/pipeline.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "P2: reduce/stabilise build latency (>180s for non-trivial ideas, QA phase is the tail) or raise the documented expectation; guard against concurrent builds multiplying the time.",
+    "P2: add a completeness guard for generated projects — inject backend/requirements.txt, backend/.env.example and docker-compose.yml if the agents omit them (observed missing in 1 of 3 builds).",
+    "P3: fix the '<span> cannot be a child of <option>' React warning in AgentPanel model selects; refresh /api/stats when a build finishes or on tab focus.",
+    "P3: mark stale 'running' build docs as 'error' on backend startup."
+  ],
+  "critical_code_review_comments": [
+    "_bad_preview() now catches JSX-without-babel and the blank-preview P1 is confirmed fixed end-to-end; consider also rejecting previews whose <body> has <200 chars of text to catch semantically empty output.",
+    "server.py is 717 lines mixing auth, chat, email, research, the 8-agent build pipeline and admin — split into routers (auth/, workspaces/, builder/) before it grows further.",
+    "_set_agent() does an update + read + second update on every status change (3 round-trips x ~20 transitions per build); a single aggregation-pipeline update could recompute progress atomically and avoids a race between concurrent Phase-2 agents.",
+    "BuilderContext.build() polls with a fixed 150 x 2.5s loop and no AbortController; if the user reloads or the tab unmounts mid-build the loop keeps running until the counter expires (stopRef is never set anywhere)."
+  ],
+  "updated_files": ["/app/backend/tests/test_agents_pipeline.py"],
+  "success_rate": {"backend": "96% (54/56 cases; new 8-agent pipeline suite 11/11)", "frontend": "100% of tested flows (builder, house animation, 8-agent live status, model sync, preview, zip, team, chat, research, admin)"},
+  "seed_data_creation": "Seeded a super-admin session (user_TEST_fe_d00c2bbf / TEST_fe_8e91...) plus pytest-fixture users; all purged afterwards — 0 leftover TEST users/sessions/apps verified.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md is accurate; the mongosh/pymongo seeded session works as Bearer header and as the secure httpOnly cookie 'session_token' with domain jarvis-os-52.preview.emergentagent.com.",
+  "context_for_next_testing_agent": "New suite: /app/backend/tests/test_agents_pipeline.py runs ONE shared build (class fixture build_run) and asserts /api/models, POST latency, monotonic progress, agent transitions, per-agent model overrides, 30+ files, vanilla preview, zip and auth scoping — run it with -n 0 to keep only one build in flight (~105s). Do NOT run it together with backend_test.py::TestBuildAndStats and test_build_truncation.py::TestBuildAsyncJob: 3 concurrent builds push each past the 180s poll budget (that is exactly why those 2 legacy tests failed this run). Frontend build takes ~180s wall-clock via the UI; poll up to 230s. Blank-preview P1 from iteration 7 is fixed (iframe body text verified non-empty).",
+  "rca_of_the_issue": "The 2 regression failures are NOT code defects in the new pipeline: (a) backend_test.py::test_multiagent_build_zip_stats_and_history timed out because its 180s poll budget was consumed while 2 other builds ran concurrently (doc was at progress 87, QA agent still working) — each build fires 6 parallel LLM calls in Phase 2, so concurrency serialises at the LLM gateway; (b) test_build_truncation.py asserts <120s and the presence of backend/requirements.txt — the build finished in 179s (same concurrency cause) and the Backend agent simply did not emit requirements.txt for that idea, an LLM-compliance gap that needs a server-side completeness guard."
+}

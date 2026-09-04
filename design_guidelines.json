@@ -1,0 +1,225 @@
+{
+  "project_name": "Bhai.AI - Full-Stack App & Website Creator",
+  "brand_identity": {
+    "name": "Bhai.AI",
+    "mascot": "Bhaiya (Friendly Bihari Boy Developer with traditional Gamcha & modern dev specs)",
+    "theme_concept": "Traditional Bihari Mithila/Madhubani Folk-Art Fusion meets Ultra-Modern Dev Tool / IDE",
+    "vibe": "Warm, authentic, highly energetic, culturally rich, non-generic, high-craft developer workspace",
+    "build_metaphor": "Makan Ban Raha Hai (House Construction Progression mapped to Real-time Agent Build Progress %)"
+  },
+  "color_system": {
+    "mode": "Dual Theme Support (Default Dark Clay Studio with Warm Sand Light option)",
+    "palette": {
+      "terracotta_primary": "#D95D39",
+      "terracotta_hover": "#C24E2B",
+      "marigold_mustard": "#E5A93C",
+      "deep_indigo": "#1B2A4A",
+      "henna_green": "#3E7B52",
+      "vermilion_accent": "#E63946",
+      "mud_clay_dark": "#181210",
+      "clay_card_dark": "#241B17",
+      "clay_border_dark": "#3D2E28",
+      "paper_sand_light": "#F7F3EC",
+      "paper_card_light": "#FFFFFF",
+      "paper_border_light": "#E2D7C3",
+      "text_light_primary": "#FDFBF7",
+      "text_light_muted": "#A89B91",
+      "text_dark_primary": "#221A16",
+      "text_dark_muted": "#6E6057"
+    },
+    "css_variables": {
+      "--bg-canvas": "#181210",
+      "--bg-surface": "#241B17",
+      "--bg-surface-hover": "#2E231E",
+      "--border-mithila": "#3D2E28",
+      "--accent-terracotta": "#D95D39",
+      "--accent-marigold": "#E5A93C",
+      "--accent-indigo": "#1B2A4A",
+      "--accent-henna": "#3E7B52",
+      "--text-main": "#FDFBF7",
+      "--text-sub": "#A89B91"
+    }
+  },
+  "typography": {
+    "heading_font": "Outfit, Rozha One, sans-serif",
+    "body_font": "Plus Jakarta Sans, sans-serif",
+    "code_font": "JetBrains Mono, monospace",
+    "hierarchy": {
+      "h1_hero": "text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight",
+      "h2_section": "text-2xl sm:text-3xl lg:text-4xl font-semibold tracking-tight",
+      "h3_card": "text-lg sm:text-xl font-medium",
+      "body_main": "text-base leading-relaxed",
+      "caption_mono": "text-xs font-mono tracking-wider uppercase"
+    }
+  },
+  "house_construction_animation_spec": {
+    "title": "Makan Ban Raha Hai (App Construction Engine)",
+    "container_style": "Madhubani geometric border frame with live stage indicator and animated SVG builder canvas",
+    "stages": [
+      {
+        "percentage_range": "0% - 20%",
+        "stage_name": "Buniyaad (Foundation & Layout)",
+        "active_agents": ["Architect", "Database"],
+        "visual_elements": "Excavation, ground leveling, concrete footing grid lines, rebar blueprint overlay, Bhaiya inspecting blueprints with hardhat"
+      },
+      {
+        "percentage_range": "21% - 50%",
+        "stage_name": "Deewar (Walls, Columns & Scaffold)",
+        "active_agents": ["Backend", "DevOps"],
+        "visual_elements": "Red brick wall stacking animation, bamboo scaffolding, pillar framing, mortar application, active code stream emitting brick particles"
+      },
+      {
+        "percentage_range": "51% - 80%",
+        "stage_name": "Chhat & Lintel (Roof Slab & Framework)",
+        "active_agents": ["Frontend", "Designer"],
+        "visual_elements": "Concrete roof slab pouring, door/window lintel placement, color paint splash palette, UI layout wireframe becoming physical house walls"
+      },
+      {
+        "percentage_range": "81% - 99%",
+        "stage_name": "Sajaawat & Electrical (Finishing & Painting)",
+        "active_agents": ["QA/Tester", "Preview"],
+        "visual_elements": "Traditional Mithila wall painting motifs blooming on walls, warm yellow lights switching on, window glass installation, live preview iframe warming up"
+      },
+      {
+        "percentage_range": "100%",
+        "stage_name": "Griha Pravesh (House Ready & App Live!)",
+        "active_agents": ["All Agents Done"],
+        "visual_elements": "Fully constructed vibrant house with glowing windows, Marigold garland decoration, downloadable zip box unlocked, instant live interactive preview active"
+      }
+    ]
+  },
+  "agent_team_spec": {
+    "total_agents": 8,
+    "roles": [
+      {
+        "id": "architect",
+        "name": "Naksi Bhai (Architect)",
+        "default_model": "GPT-4o",
+        "avatar_icon": "Compass",
+        "responsibility": "System architecture, stack selection, API contracts, folder structure"
+      },
+      {
+        "id": "backend",
+        "name": "Kariya Bhai (Backend Dev)",
+        "default_model": "Claude 3.5 Sonnet",
+        "avatar_icon": "Server",
+        "responsibility": "FastAPI routes, business logic, data models, auth & middleware"
+      },
+      {
+        "id": "frontend",
+        "name": "Chhotu Bhai (Frontend Dev)",
+        "default_model": "Claude 3.5 Sonnet",
+        "avatar_icon": "Code2",
+        "responsibility": "React components, state management, interactive hooks, responsive UI"
+      },
+      {
+        "id": "designer",
+        "name": "Rangi Bhai (UI/UX Designer)",
+        "default_model": "GPT-4o",
+        "avatar_icon": "Palette",
+        "responsibility": "Tailwind color schemes, typography, layout hierarchy, micro-interactions"
+      },
+      {
+        "id": "database",
+        "name": "Khatiyan Bhai (Database Spec)",
+        "default_model": "GPT-4o",
+        "avatar_icon": "Database",
+        "responsibility": "Schemas, migrations, seed data, indexing and state management"
+      },
+      {
+        "id": "devops",
+        "name": "Mistry Bhai (DevOps)",
+        "default_model": "Claude 3.5 Sonnet",
+        "avatar_icon": "Terminal",
+        "responsibility": "Package bundler, environment variables, runner scripts, build checks"
+      },
+      {
+        "id": "qa",
+        "name": "Jaanch Bhai (QA Tester)",
+        "default_model": "GPT-4o",
+        "avatar_icon": "CheckCircle2",
+        "responsibility": "E2E verification, test suite generation, edge case validation"
+      },
+      {
+        "id": "preview",
+        "name": "Pradarshan Bhai (Live Preview)",
+        "default_model": "Claude 3.5 Sonnet",
+        "avatar_icon": "MonitorPlay",
+        "responsibility": "Hot-reloading runtime iframe preview, interactive state synchronization"
+      }
+    ],
+    "models_available": [
+      {"id": "gpt-4o", "name": "OpenAI GPT-4o", "badge": "High Speed"},
+      {"id": "claude-3-5-sonnet", "name": "Anthropic Claude 3.5 Sonnet", "badge": "High Precision"},
+      {"id": "gpt-4o-mini", "name": "OpenAI GPT-4o Mini", "badge": "Lightweight"},
+      {"id": "claude-3-haiku", "name": "Anthropic Claude 3 Haiku", "badge": "Fast"}
+    ],
+    "status_chip_styles": {
+      "queued": "bg-amber-500/10 text-amber-400 border-amber-500/30",
+      "working": "bg-terracotta/20 text-terracotta border-terracotta/50 animate-pulse",
+      "done": "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+      "error": "bg-red-500/10 text-red-400 border-red-500/30"
+    }
+  },
+  "layout_architecture": {
+    "header": {
+      "left": "Bhai.AI logo with Bhaiya mascot badge, workspace switcher menu",
+      "center": "Workspace view tabs (Builder, Agent Activity Team, AI Chat, Email, Web Research, Image Gen, Admin)",
+      "right": "Model Preset selector, Theme Toggle, Download Project Zip button, User Profile"
+    },
+    "builder_view": {
+      "type": "3-Pane Studio Layout with Collapsible Side-Panel",
+      "left_pane": "Prompt Input Box, Quick Idea Chips (E-commerce, SaaS, Portfolio, CRM), History & Saved Projects",
+      "center_pane": "House Construction Progress Visualizer + Live Interactive Preview Frame + File Explorer & Code Editor Tabs",
+      "right_side_panel": "Live Agent Activity Feed (collapsible, showing real-time agent output logs, status chips, model picker)"
+    },
+    "team_view": {
+      "type": "Dedicated Agent Activity & Model Control Matrix",
+      "top_bar": "Global Team Status, Total Progress %, Active Model Distribution, Token Consumption",
+      "grid": "8-Card Responsive Bento Grid with per-agent model pickers, live logs, contribution feed, manual agent override triggers"
+    }
+  },
+  "image_urls": [
+    {
+      "category": "terracotta_craft_art",
+      "url": "https://images.unsplash.com/photo-1641741689528-e31bacf15d89?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHwzfHx0ZXJyYWNvdHRhJTIwYXJjaGl0ZWN0dXJlJTIwaW5kaWFuJTIwYXJ0JTIwY3JhZnR8ZW58MHx8fHwxNzg4NTM5OTc1fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Clay terracota traditional sculptures"
+    },
+    {
+      "category": "developer_workspace",
+      "url": "https://images.unsplash.com/photo-1498050108023-c5249f4df085?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHw3fHxtb2Rlcm4lMjBkZXZlbG9wZXIlMjB3b3Jrc3BhY2UlMjBzb2Z0d2FyZSUyMGNvZGV8ZW58MHx8fHwxNzg4NTM5OTg0fDA&ixlib=rb-4.1.0&q=85",
+      "description": "MacBook workspace with active code editor"
+    },
+    {
+      "category": "construction_structure",
+      "url": "https://images.unsplash.com/photo-1508450859948-4e04fabaa4ea?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY6NzV8MHwxfHNlYXJjaHwxfHxidWlsZGluZyUyMGNvbnN0cnVjdGlvbiUyMHN0cnVjdHVyZSUyMHNjYWZmb2xkfGVufDB8fHx8MTc4ODUzOTk4NHww&ixlib=rb-4.1.0&q=85",
+      "description": "Building scaffold and concrete structure under construction"
+    }
+  ],
+  "testing_requirements": {
+    "mandatory_data_testid": true,
+    "key_test_ids": [
+      "builder-prompt-input",
+      "builder-submit-button",
+      "house-construction-progress-bar",
+      "house-construction-stage-label",
+      "agent-activity-side-panel",
+      "agent-team-tab",
+      "per-agent-model-select",
+      "live-preview-iframe",
+      "file-browser-tree",
+      "download-project-zip-button",
+      "theme-toggle-button",
+      "workspace-nav-item"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Execute all frontend implementation using React and Tailwind CSS.",
+    "Ensure all components use data-testid attributes.",
+    "Implement the house construction progress animation with smooth stage transitions (0% to 100%).",
+    "Include both the collapsible live side-panel and the full dedicated Agent Activity Team tab.",
+    "Provide model dropdown selectors for each of the 8 agents.",
+    "Retain all existing workspaces (AI Chat, Email Generator, Web Research, Image Generator, Admin Console).",
+    "Enforce Mithila geometric border motifs and terracotta-marigold accent styling across all views."
+  ]
+}
