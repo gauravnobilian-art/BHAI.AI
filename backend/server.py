@@ -11,6 +11,8 @@ import uuid
 import zipfile
 import asyncio
 import logging
+import json
+import re
 import requests
 
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -18,7 +20,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
@@ -307,7 +309,6 @@ async def research(req: ResearchRequest, user: dict = Depends(get_current_user))
 
 
 def _extract_html(raw: str) -> str:
-    import re
     txt = raw.strip()
     fence = re.search(r"```(?:html)?\s*(<!DOCTYPE html.*?</html>)\s*```", txt,
                       re.DOTALL | re.IGNORECASE)
@@ -336,7 +337,6 @@ def _extract_html(raw: str) -> str:
 
 
 def _parse_files(raw: str) -> List[dict]:
-    import re
     files = []
     seen = set()
     for m in re.finditer(r"===\s*(.+?)\s*===\s*```[a-zA-Z0-9.+-]*\n(.*?)```", raw, re.DOTALL):
@@ -506,9 +506,126 @@ async def _set_agent(app_id: str, aid: str, **fields):
                                  {"$set": {"progress": int(done / len(ags) * 100)}})
 
 
+class ImageEditRequest(BaseModel):
+    image_base64: str
+    prompt: str
+
+
+@api_router.post("/image/edit")
+async def image_edit(req: ImageEditRequest, user: dict = Depends(get_current_user)):
+    raw = req.image_base64 or ""
+    b64 = raw.split(",", 1)[1] if raw.startswith("data:") else raw
+    if not b64 or not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="A photo and a prompt are both required.")
+    try:
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=str(uuid.uuid4()),
+                       system_message="You are an expert image editor. Edit the given photo.")
+        chat.with_model("gemini", "gemini-3.1-flash-image-preview").with_params(
+            modalities=["image", "text"])
+        msg = UserMessage(text=req.prompt.strip(), file_contents=[ImageContent(b64)])
+        text, images = await chat.send_message_multimodal_response(msg)
+        if not images:
+            raise HTTPException(status_code=502, detail="No image was returned. Try another prompt.")
+        img = images[0]
+        return {"image": f"data:{img['mime_type']};base64,{img['data']}", "text": text or ""}
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception("image edit error")
+        raise HTTPException(status_code=502, detail="Image edit failed. Please try again.")
+
+
 @api_router.get("/models")
 async def list_models(_: dict = Depends(get_current_user)):
     return {"models": MODELS, "agents": AGENTS_CFG}
+
+
+THEME_KEYS = ["bank", "shop", "food", "health", "school", "app"]
+
+
+def _parse_json(raw: str):
+    if not raw:
+        return None
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return None
+    for candidate in (m.group(0), m.group(0).replace("\n", " ")):
+        try:
+            return json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+async def _plan_crew(idea: str, models: dict):
+    """Ask the LLM to cast a fun, project-themed Bihari crew + pick an animation theme."""
+    p, m = _resolve_model(models, "architect")
+    sys = (
+        "You are the FUN cast director of a Bihari-themed app-building studio. Given the app idea, "
+        "(1) pick a THEME from exactly: bank, shop, food, health, school, app (use 'app' if none fit); "
+        "(2) name an 8-person crew whose ROLE TITLES match the app's real-world domain (e.g. a banking "
+        "app -> Manager Babu, Cashier Bhaiya, Clerk, Chaprasi; a food app -> Head Bawarchi, Waiter "
+        "Bhaiya). Each crew member maps to a FIXED technical id. Give each a warm Bihari name and one "
+        "short, funny Bhojpuri quip. Also write 6 lines of playful Bhojpuri banter between them about "
+        "building THIS app. Reply with ONLY strict minified JSON, no markdown, exactly this shape:\n"
+        '{"theme":"bank","theme_label":"short Hindi label e.g. Bank Nirman",'
+        '"crew":[{"id":"architect","name":"","title":"","quip":""},'
+        '{"id":"database","name":"","title":"","quip":""},'
+        '{"id":"backend","name":"","title":"","quip":""},'
+        '{"id":"frontend","name":"","title":"","quip":""},'
+        '{"id":"designer","name":"","title":"","quip":""},'
+        '{"id":"devops","name":"","title":"","quip":""},'
+        '{"id":"preview","name":"","title":"","quip":""},'
+        '{"id":"qa","name":"","title":"","quip":""}],'
+        '"banter":[{"from":"","text":""}]}'
+    )
+    try:
+        raw = await llm(sys, f"App idea: {idea}", p, m, max_tokens=1400)
+        data = _parse_json(raw)
+        if data and isinstance(data.get("crew"), list):
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _build_documentation(idea: str, plan: str, files: List[dict]) -> str:
+    tree = "\n".join(f"- `{f['path']}`" for f in sorted(files, key=lambda x: x["path"]))
+    return f"""# {idea}
+
+> Generated by **Bhai.AI** — Bihar ka apna full-stack builder.
+
+## What is this app?
+{plan}
+
+## 🚀 See it live (no coding needed)
+1. **Instant demo:** open `index.html` (or `preview/index.html`) in any web browser — the full
+   interactive demo runs immediately, no installation required.
+2. **Publish free on GitHub Pages:** push this folder to a GitHub repo →
+   **Settings → Pages → Source: `main` branch, `/root`** → Save. Your live demo will be online at
+   `https://<your-username>.github.io/<repo-name>/`.
+
+## 🛠 Run the full-stack app locally
+Requires Docker. From this folder:
+```bash
+docker compose up --build
+```
+- Frontend → http://localhost:3000
+- Backend API → http://localhost:8001
+
+Manual: copy `backend/.env.example` to `backend/.env`, then
+`pip install -r backend/requirements.txt && uvicorn server:app --port 8001`
+and `cd frontend && yarn && yarn start`.
+
+## 📁 Project structure
+{tree}
+
+## 🧰 Tech stack
+React (frontend) · FastAPI (backend) · MongoDB (database) · Docker.
+
+---
+Built with ❤️ by the Bhai.AI crew.
+"""
 
 
 @api_router.post("/build")
@@ -540,6 +657,21 @@ async def build(req: BuildRequest, user: dict = Depends(get_current_user)):
 
 async def _run_build(app_id: str, idea: str, models: dict):
     try:
+        # ---- Phase 0: cast a fun, project-themed Bihari crew + animation theme ----
+        crew = await _plan_crew(idea, models)
+        if crew:
+            theme = crew.get("theme") if crew.get("theme") in THEME_KEYS else "app"
+            await db.apps.update_one({"id": app_id}, {"$set": {
+                "theme": theme,
+                "theme_label": (crew.get("theme_label") or "")[:40],
+                "banter": (crew.get("banter") or [])[:8]}})
+            for c in crew.get("crew", []):
+                if c.get("id") in AGENT_IDS:
+                    await _set_agent(app_id, c["id"],
+                                     name=(c.get("name") or "")[:40],
+                                     title=(c.get("title") or "")[:44],
+                                     quip=(c.get("quip") or "")[:160])
+
         # ---- Phase 1: Architect (spec everyone else depends on) ----
         await _set_agent(app_id, "architect", status="working")
         ap, am = _resolve_model(models, "architect")
@@ -572,8 +704,12 @@ async def _run_build(app_id: str, idea: str, models: dict):
                            "working demo as ONE HTML document. Use ONLY vanilla HTML, inline CSS, and "
                            "plain vanilla JavaScript (DOM APIs) with in-memory sample data. ABSOLUTELY "
                            "NO React, JSX, Vue, Angular, or any library that needs a build/transpile "
-                           "step; NEVER use <script type='text/babel'>. Make it look polished and "
-                           "enterprise-grade. Keep it compact so it fits, and ALWAYS finish with "
+                           "step; NEVER use <script type='text/babel'>. Render the MAIN working screen "
+                           "of the app DIRECTLY with realistic, NON-EMPTY sample data — real-looking "
+                           "names, amounts, dates and several table/list rows (never all zeros or empty "
+                           "states) — and do NOT show a login or sign-in gate as the first screen. Draw "
+                           "any charts with inline SVG/CSS (no external chart libs). Make it look polished "
+                           "and enterprise-grade. Keep it compact so it fits, and ALWAYS finish with "
                            "</body></html>. Return ONLY the HTML from <!DOCTYPE html> to </html>.")
             try:
                 prev_raw = await llm(preview_sys, ctx, p, m, max_tokens=7000)
@@ -642,6 +778,8 @@ async def _run_build(app_id: str, idea: str, models: dict):
         except Exception as exc:  # noqa: BLE001
             await _set_agent(app_id, "qa", status="error", contribution=str(exc)[:120])
 
+        files = _dedupe_files(files + [{"path": "DOCUMENTATION.md",
+                                        "content": _build_documentation(idea, plan, files)}])
         preview_html = preview_html or "<!DOCTYPE html><html><body><h1>Preview unavailable</h1></body></html>"
         await db.apps.update_one({"id": app_id}, {"$set": {
             "status": "done", "progress": 100, "plan": plan, "files": files,
@@ -658,8 +796,22 @@ async def get_app(app_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="App not found")
     return {"id": doc["id"], "status": doc.get("status", "done"), "idea": doc.get("idea", ""),
             "progress": doc.get("progress", 0), "agents": doc.get("agents", []),
+            "theme": doc.get("theme", "app"), "theme_label": doc.get("theme_label", ""),
+            "banter": doc.get("banter", []),
             "plan": doc.get("plan", ""), "files": doc.get("files", []),
             "preview_html": doc.get("preview_html", ""), "error": doc.get("error", "")}
+
+
+@api_router.get("/apps/{app_id}/preview")
+async def app_preview(app_id: str):
+    """Public, shareable live preview of a generated app (unlisted by uuid)."""
+    from fastapi.responses import HTMLResponse
+    doc = await db.apps.find_one({"id": app_id}, {"_id": 0, "preview_html": 1})
+    html = doc and doc.get("preview_html")
+    if not html:
+        return HTMLResponse("<h1 style='font-family:sans-serif'>Preview not ready yet…</h1>",
+                            status_code=404)
+    return HTMLResponse(html)
 
 
 @api_router.get("/apps/{app_id}/zip")
@@ -674,6 +826,7 @@ async def app_zip(app_id: str, user: dict = Depends(get_current_user)):
             zf.writestr(f["path"], f["content"])
         if doc.get("preview_html"):
             zf.writestr("preview/index.html", doc["preview_html"])
+            zf.writestr("index.html", doc["preview_html"])  # GitHub Pages entry
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/zip",
                              headers={"Content-Disposition": 'attachment; filename="bhai-app.zip"'})

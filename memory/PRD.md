@@ -41,7 +41,25 @@ so Jarvis was rebuilt natively on React+FastAPI to be usable at the emergent.hos
 ## Test credentials
 None (no auth yet). EMERGENT_LLM_KEY in /app/backend/.env.
 
-## Update 2026-06 (b) — Rebrand to Bhai.AI + 8-agent enterprise builder (verified)
+## Update 2026-06 (c) — Live package: shareable preview, themed crew, photo→image
+- **Project-themed crew + animation**: `_plan_crew()` (LLM) casts a Bihari crew whose role titles
+  match the app domain (banking → Manager Babu, Cashier Bhaiya, Tijori Tufani…) + picks an
+  animation `theme` (bank/shop/food/health/school/app) + 6 Bhojpuri banter lines. Stored on the
+  app doc; `GET /api/apps/{id}` returns theme/theme_label/banter and themed agent name/title/quip.
+- **Dynamic construction animation** `BuildScene.jsx` swaps the building (sign/emblem/accent/stage
+  labels) by theme, driven by real build %. Crew now shown as a **horizontal row** below the
+  animation; a live **Bhojpuri banter feed** (with optional hi-IN voice) reveals lines as progress
+  climbs; an **"Aur koi instruction?"** box appends to the build.
+- **Shareable live preview**: public `GET /api/apps/{id}/preview` (no auth, unlisted uuid) serves
+  the demo HTML → "Open in new tab" button. Preview agent now renders the MAIN screen (no login
+  gate) with realistic non-empty sample data + inline SVG charts.
+- **GitHub-ready repo**: zip includes root `index.html` (GitHub Pages entry) + `preview/index.html`
+  + always a rich `DOCUMENTATION.md` (what the app does, how to view live, how to run, file tree).
+- **Photo → Image** (NEW): `POST /api/image/edit` uses Gemini Nano Banana
+  (`gemini-3.1-flash-image-preview`) via Emergent Universal Key to edit an uploaded photo
+  (camera or gallery) by prompt. Frontend Image tab has Text→Image (Pollinations) and Photo→Image
+  (camera/gallery upload, client-side resize) modes. Verified working via curl.
+- Note: verified via curl + manual (user opted to test the UI manually; no testing agent run).
 Renamed **Jarvis → Bhai.AI** (Traditional Bihari theme, "Bhaiya" mascot + logo in /frontend/public).
 Turned the builder into an Emergent-style full-stack CREATOR:
 - **8-agent team** (Architect/Naksi, Database/Khatiyan, Backend/Kariya, Frontend/Chhotu,

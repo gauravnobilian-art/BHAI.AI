@@ -2,12 +2,12 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import "@/App.css";
 import { API, http } from "./http";
 import { BuilderProvider, useBuilder } from "./builder/BuilderContext";
-import HouseBuild from "./builder/HouseBuild";
+import BuildScene from "./builder/BuildScene";
 import AgentPanel from "./builder/AgentPanel";
 import {
   MessageSquare, Mail, Search, Image as ImageIcon, Rocket,
   Send, Download, Copy, Check, Sparkles, Wand2, Mic, Volume2, VolumeX, LogOut, Trash2,
-  LayoutDashboard, Shield, Radio, Users, Plus, Hammer,
+  LayoutDashboard, Shield, Radio, Users, Plus, Hammer, ExternalLink, Camera, Upload,
 } from "lucide-react";
 
 const TABS = [
@@ -247,30 +247,115 @@ function ResearchTab() {
 }
 
 /* ------------------------------- Image ------------------------------- */
+function resizeToDataUrl(file, max = 1024) {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > max || height > max) {
+        const r = Math.min(max / width, max / height);
+        width = Math.round(width * r); height = Math.round(height * r);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
 function ImageTab() {
+  const [mode, setMode] = useState("text");
+  // text->image (Pollinations)
   const [prompt, setPrompt] = useState(""); const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false); const [err, setErr] = useState(false);
   const [w, setW] = useState(1024); const [h, setH] = useState(1024);
+  // photo->image (Nano Banana)
+  const [photo, setPhoto] = useState(""); const [pPrompt, setPPrompt] = useState("");
+  const [pResult, setPResult] = useState(""); const [pLoading, setPLoading] = useState(false);
+  const [pErr, setPErr] = useState("");
+  const camRef = useRef(null); const galRef = useRef(null);
+
   const gen = () => {
     if (!prompt.trim()) return; setLoading(true); setErr(false);
     const seed = Math.floor(Math.random() * 1e6);
     setUrl(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt.trim())}?width=${w}&height=${h}&nologo=true&seed=${seed}`);
   };
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setPErr(""); setPResult("");
+    try { setPhoto(await resizeToDataUrl(file)); }
+    catch { setPErr("⚠️ Couldn't read that image."); }
+    e.target.value = "";
+  };
+
+  const editPhoto = async () => {
+    if (!photo || !pPrompt.trim() || pLoading) return;
+    setPLoading(true); setPErr(""); setPResult("");
+    try {
+      const { data } = await http.post("/image/edit", { image_base64: photo, prompt: pPrompt.trim() });
+      setPResult(data.image);
+    } catch (e) {
+      setPErr("⚠️ " + (e.response?.data?.detail || "Image edit failed. Try again."));
+    } finally { setPLoading(false); }
+  };
+
   return (
     <div data-testid="image-tab">
-      <textarea data-testid="image-prompt" className="jv-textarea" style={{ minHeight: 90 }} placeholder="Describe your image — a Madhubani-style peacock, vibrant, 8k" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-      <div style={{ display: "flex", gap: ".8rem", alignItems: "center", marginTop: ".8rem", flexWrap: "wrap" }}>
-        <select data-testid="image-width" className="jv-select" style={{ width: 130 }} value={w} onChange={(e) => setW(+e.target.value)}>{[512, 768, 1024].map((n) => <option key={n} value={n}>W {n}</option>)}</select>
-        <select data-testid="image-height" className="jv-select" style={{ width: 130 }} value={h} onChange={(e) => setH(+e.target.value)}>{[512, 768, 1024].map((n) => <option key={n} value={n}>H {n}</option>)}</select>
-        <button data-testid="image-generate" className="jv-btn" onClick={gen}><Wand2 size={16} /> Generate</button>
+      <div style={{ display: "flex", gap: ".5rem", marginBottom: "1rem", flexWrap: "wrap" }}>
+        <button data-testid="image-mode-text" className={`jv-preset ${mode === "text" ? "active" : ""}`} onClick={() => setMode("text")}>Text → Image</button>
+        <button data-testid="image-mode-photo" className={`jv-preset ${mode === "photo" ? "active" : ""}`} onClick={() => setMode("photo")}>Photo → Image</button>
       </div>
-      {url && (
-        <div className="jv-card" style={{ padding: "1rem", marginTop: "1rem", textAlign: "center" }}>
-          {loading && <div className="jv-muted" style={{ marginBottom: ".5rem", display: "flex", gap: ".5rem", justifyContent: "center" }}><Spinner /> Rendering…</div>}
-          {err && <div style={{ color: "var(--red-2)" }} data-testid="image-error">⚠️ Image failed to load. Try again.</div>}
-          {!err && <img data-testid="image-result" src={url} alt={prompt} onLoad={() => setLoading(false)} onError={() => { setLoading(false); setErr(true); }} style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid var(--border)" }} />}
-          {!err && !loading && <div style={{ marginTop: ".8rem" }}><a data-testid="image-download" className="jv-btn" href={url} target="_blank" rel="noreferrer" download="bhai-image.png"><Download size={16} /> Download</a></div>}
-        </div>
+
+      {mode === "text" && (
+        <>
+          <textarea data-testid="image-prompt" className="jv-textarea" style={{ minHeight: 90 }} placeholder="Describe your image — a Madhubani-style peacock, vibrant, 8k" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          <div style={{ display: "flex", gap: ".8rem", alignItems: "center", marginTop: ".8rem", flexWrap: "wrap" }}>
+            <select data-testid="image-width" className="jv-select" style={{ width: 130 }} value={w} onChange={(e) => setW(+e.target.value)}>{[512, 768, 1024].map((n) => <option key={n} value={n}>W {n}</option>)}</select>
+            <select data-testid="image-height" className="jv-select" style={{ width: 130 }} value={h} onChange={(e) => setH(+e.target.value)}>{[512, 768, 1024].map((n) => <option key={n} value={n}>H {n}</option>)}</select>
+            <button data-testid="image-generate" className="jv-btn" onClick={gen}><Wand2 size={16} /> Generate</button>
+          </div>
+          {url && (
+            <div className="jv-card" style={{ padding: "1rem", marginTop: "1rem", textAlign: "center" }}>
+              {loading && <div className="jv-muted" style={{ marginBottom: ".5rem", display: "flex", gap: ".5rem", justifyContent: "center" }}><Spinner /> Rendering…</div>}
+              {err && <div style={{ color: "var(--red-2)" }} data-testid="image-error">⚠️ Image failed to load. Try again.</div>}
+              {!err && <img data-testid="image-result" src={url} alt={prompt} onLoad={() => setLoading(false)} onError={() => { setLoading(false); setErr(true); }} style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid var(--border)" }} />}
+              {!err && !loading && <div style={{ marginTop: ".8rem" }}><a data-testid="image-download" className="jv-btn" href={url} target="_blank" rel="noreferrer" download="bhai-image.png"><Download size={16} /> Download</a></div>}
+            </div>
+          )}
+        </>
+      )}
+
+      {mode === "photo" && (
+        <>
+          <div className="jv-card" style={{ padding: "1rem 1.2rem" }}>
+            <div className="jv-muted" style={{ marginBottom: ".7rem" }}>Apni photo daalo (camera ya gallery se) aur bataao kaise badalna hai — Bhaiya nayi image bana dega.</div>
+            <input ref={camRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: "none" }} data-testid="image-camera-input" />
+            <input ref={galRef} type="file" accept="image/*" onChange={onFile} style={{ display: "none" }} data-testid="image-gallery-input" />
+            <div style={{ display: "flex", gap: ".6rem", flexWrap: "wrap" }}>
+              <button data-testid="image-take-photo" className="jv-btn jv-btn-ghost" onClick={() => camRef.current?.click()}><Camera size={16} /> Take photo</button>
+              <button data-testid="image-choose-gallery" className="jv-btn jv-btn-ghost" onClick={() => galRef.current?.click()}><Upload size={16} /> Choose from gallery</button>
+            </div>
+            {photo && <img data-testid="image-uploaded-preview" src={photo} alt="uploaded" style={{ maxWidth: "100%", maxHeight: 260, marginTop: ".9rem", borderRadius: 10, border: "1px solid var(--border)" }} />}
+          </div>
+
+          <textarea data-testid="image-edit-prompt" className="jv-textarea" style={{ minHeight: 80, marginTop: ".8rem" }} placeholder="e.g. make it a Madhubani painting, add a festive background, turn into a cartoon…" value={pPrompt} onChange={(e) => setPPrompt(e.target.value)} />
+          <div style={{ marginTop: ".8rem" }}>
+            <button data-testid="image-edit-generate" className="jv-btn" onClick={editPhoto} disabled={pLoading || !photo || !pPrompt.trim()}>{pLoading ? <Spinner /> : <Wand2 size={16} />} {pLoading ? "Ban raha hai…" : "Generate from photo"}</button>
+          </div>
+          {pErr && <div style={{ color: "var(--red-2)", marginTop: ".8rem" }} data-testid="image-edit-error">{pErr}</div>}
+          {pResult && (
+            <div className="jv-card" style={{ padding: "1rem", marginTop: "1rem", textAlign: "center" }}>
+              <img data-testid="image-edit-result" src={pResult} alt="result" style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid var(--border)" }} />
+              <div style={{ marginTop: ".8rem" }}><a data-testid="image-edit-download" className="jv-btn" href={pResult} download="bhai-edited.png"><Download size={16} /> Download</a></div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -284,14 +369,58 @@ const IDEA_CHIPS = [
   "A CRM to manage leads, deals and tasks",
 ];
 
+function ChatterFeed({ banter, progress, building, voice }) {
+  const spokenRef = useRef(-1);
+  const count = banter.length
+    ? Math.min(banter.length, Math.max(building ? 1 : 0, Math.ceil((progress / 100) * banter.length)))
+    : 0;
+  const shown = banter.slice(0, count);
+
+  useEffect(() => {
+    if (!voice || shown.length === 0) return;
+    const last = shown.length - 1;
+    if (last > spokenRef.current) {
+      spokenRef.current = last;
+      try {
+        const u = new SpeechSynthesisUtterance(shown[last].text);
+        u.lang = "hi-IN"; u.rate = 1.02;
+        const hi = window.speechSynthesis.getVoices().find((v) => v.lang && v.lang.startsWith("hi"));
+        if (hi) u.voice = hi;
+        window.speechSynthesis.speak(u);
+      } catch { /* noop */ }
+    }
+  }, [shown, voice]);
+
+  if (shown.length === 0) return null;
+  return (
+    <div className="jv-card" style={{ padding: ".8rem 1rem", marginTop: "1rem" }} data-testid="chatter-feed">
+      <div className="jv-mono jv-muted" style={{ fontSize: ".72rem", marginBottom: ".6rem" }}>💬 SITE PE BAATCHEET (BHOJPURI)</div>
+      <div className="bhai-chatter">
+        {shown.map((b, i) => (
+          <div className="bhai-chat-line" key={i}>
+            <div className="bhai-chat-av">{(b.from || "B").slice(0, 1)}</div>
+            <div className="bhai-chat-bubble">
+              <div className="bhai-chat-from">{b.from}</div>
+              <div className="bhai-chat-text">{b.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function BuildTab() {
   const {
-    idea, setIdea, refine, setRefine, building, progress, result, error,
-    apps, build, applyRefine,
+    idea, setIdea, extra, setExtra, refine, setRefine, building, progress,
+    theme, themeLabel, banter, result, error, apps, build, applyRefine,
   } = useBuilder();
   const [openFile, setOpenFile] = useState(null);
+  const [voice, setVoice] = useState(false);
+  const active = building || progress > 0 || result;
 
-  const downloadZip = () => result?.appId && window.open(`${API}/apps/${result.appId}/zip`, "_blank");
+  const zipUrl = result?.appId ? `${API}/apps/${result.appId}/zip` : "";
+  const previewUrl = result?.appId ? `${API}/apps/${result.appId}/preview` : "";
 
   return (
     <div data-testid="build-tab">
@@ -299,7 +428,7 @@ function BuildTab() {
         <img src="/bhaiya-mascot.png" alt="Bhaiya" style={{ width: 58, height: 58, objectFit: "contain", flex: "none" }} />
         <div>
           <div className="jv-mono jv-muted" style={{ fontSize: ".76rem", marginBottom: ".2rem" }}>ENTERPRISE MULTI-AGENT BUILDER</div>
-          <div className="jv-muted">Bataao kya banana hai — Bhaiya ki 8-agent team plans, codes & tests a complete full-stack project, with a live preview.</div>
+          <div className="jv-muted">Bataao kya banana hai — Bhaiya ki team ek project-themed crew banaake, ek complete full-stack app banati hai, live preview ke saath.</div>
         </div>
       </div>
 
@@ -314,79 +443,99 @@ function BuildTab() {
         value={idea} onChange={(e) => setIdea(e.target.value)} />
       <div style={{ marginTop: ".8rem" }}>
         <button data-testid="builder-submit-button" className="jv-btn" onClick={build} disabled={building || !idea.trim()}>
-          {building ? <Spinner /> : <Hammer size={16} />} {building ? "Makan ban raha hai…" : "Build my app"}
+          {building ? <Spinner /> : <Hammer size={16} />} {building ? "Kaam chal raha hai…" : "Build my app"}
         </button>
       </div>
 
       {error && <div data-testid="build-error" style={{ color: "var(--red-2)", marginTop: ".8rem" }}>{error}</div>}
 
-      <div className="bhai-studio" style={{ marginTop: "1rem" }}>
-        {/* center pane */}
-        <div style={{ minWidth: 0 }}>
-          {(building || result) && <HouseBuild progress={progress} />}
+      {active && (
+        <>
+          {/* dynamic themed construction animation */}
+          <div style={{ marginTop: "1rem", display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".6rem", flexWrap: "wrap" }}>
+            <div className="jv-mono jv-muted" style={{ fontSize: ".74rem" }}>
+              🏗️ {themeLabel || "NIRMAAN"} {theme && theme !== "app" ? `· ${theme.toUpperCase()}` : ""}
+            </div>
+            <button className={`jv-btn jv-btn-ghost ${voice ? "jv-mic rec" : ""}`} onClick={() => setVoice(!voice)} title="Bhojpuri voice" data-testid="chatter-voice-toggle">
+              {voice ? <Volume2 size={15} /> : <VolumeX size={15} />} <span style={{ fontSize: ".8rem" }}>Bhojpuri voice</span>
+            </button>
+          </div>
+          <BuildScene progress={progress} theme={theme} />
 
-          {result?.preview_html && (
-            <>
-              <div className="jv-card" style={{ marginTop: "1rem", overflow: "hidden" }}>
-                <div style={{ padding: ".6rem 1rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
-                  <strong>Live Preview</strong>
-                  <button data-testid="download-project-zip-button" className="jv-btn" onClick={downloadZip}><Download size={16} /> Download project (.zip)</button>
+          {/* crew — horizontal line below the animation */}
+          <div className="jv-mono jv-muted" style={{ margin: "1rem 0 .5rem", fontSize: ".74rem", display: "flex", alignItems: "center", gap: ".4rem" }}>
+            <Users size={13} /> AAJ KI TEAM — kaun kya kar raha hai
+          </div>
+          <AgentPanel variant="row" />
+
+          <ChatterFeed banter={banter} progress={progress} building={building} voice={voice} />
+
+          {/* extra instructions section */}
+          <div className="jv-card" style={{ padding: ".8rem 1rem", marginTop: "1rem" }}>
+            <div className="jv-mono jv-muted" style={{ fontSize: ".72rem", marginBottom: ".5rem" }}>➕ AUR KOI INSTRUCTION? (added to your next build)</div>
+            <textarea data-testid="builder-extra-instructions" className="jv-textarea" style={{ minHeight: 60 }}
+              placeholder="e.g. add a dark theme, use rupees ₹, add an admin login…"
+              value={extra} onChange={(e) => setExtra(e.target.value)} />
+          </div>
+        </>
+      )}
+
+      {result?.preview_html && (
+        <>
+          <div className="jv-card" style={{ marginTop: "1rem", overflow: "hidden" }}>
+            <div style={{ padding: ".6rem 1rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
+              <strong>Live Preview</strong>
+              <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+                <a data-testid="open-preview-newtab" className="jv-btn jv-btn-ghost" href={previewUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Open in new tab</a>
+                <a data-testid="download-project-zip-button" className="jv-btn" href={zipUrl}><Download size={16} /> Download project (.zip)</a>
+              </div>
+            </div>
+            <iframe data-testid="live-preview-iframe" title="preview" srcDoc={result.preview_html} sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-modals" style={{ width: "100%", height: 520, border: "none", background: "#fff" }} />
+          </div>
+          <div style={{ display: "flex", gap: ".6rem", marginTop: ".8rem" }}>
+            <input data-testid="build-refine" className="jv-input" placeholder="Ask for a change — add a dark mode toggle and a chart" value={refine} onChange={(e) => setRefine(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyRefine()} />
+            <button data-testid="build-refine-btn" className="jv-btn" onClick={applyRefine} disabled={building}>{building ? <Spinner /> : <Wand2 size={16} />} Apply change</button>
+          </div>
+        </>
+      )}
+
+      {result?.plan && (
+        <details className="jv-card" style={{ padding: "1rem 1.2rem", marginTop: "1rem" }}>
+          <summary style={{ cursor: "pointer", fontWeight: 700 }}>📐 Architecture spec</summary>
+          <pre style={{ whiteSpace: "pre-wrap", marginTop: ".6rem", fontSize: ".85rem" }} className="jv-mono">{result.plan}</pre>
+        </details>
+      )}
+
+      {result?.files?.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <div className="jv-mono jv-muted" style={{ marginBottom: ".5rem", fontSize: ".8rem" }} data-testid="build-filecount">PROJECT FILES ({result.files.length}) — includes README, DOCUMENTATION.md & Dockerfiles</div>
+          <div data-testid="file-browser-tree">
+            {result.files.map((f) => (
+              <div key={f.path} className="jv-card" style={{ marginBottom: ".4rem" }}>
+                <div onClick={() => setOpenFile(openFile === f.path ? null : f.path)} style={{ padding: ".55rem .9rem", cursor: "pointer", display: "flex", justifyContent: "space-between" }} className="jv-mono">
+                  <span style={{ fontSize: ".82rem" }}>📄 {f.path}</span><span className="jv-muted">{openFile === f.path ? "▲" : "▼"}</span>
                 </div>
-                <iframe data-testid="live-preview-iframe" title="preview" srcDoc={result.preview_html} sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-modals" style={{ width: "100%", height: 520, border: "none", background: "#fff" }} />
+                {openFile === f.path && <pre style={{ margin: 0, padding: ".8rem 1rem", borderTop: "1px solid var(--border)", overflowX: "auto", fontSize: ".78rem" }}>{f.content}</pre>}
               </div>
-              <div style={{ display: "flex", gap: ".6rem", marginTop: ".8rem" }}>
-                <input data-testid="build-refine" className="jv-input" placeholder="Refine the preview — add a dark mode toggle and a chart" value={refine} onChange={(e) => setRefine(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyRefine()} />
-                <button data-testid="build-refine-btn" className="jv-btn" onClick={applyRefine} disabled={building}>{building ? <Spinner /> : <Wand2 size={16} />} Apply</button>
-              </div>
-            </>
-          )}
-
-          {result?.plan && (
-            <details className="jv-card" style={{ padding: "1rem 1.2rem", marginTop: "1rem" }}>
-              <summary style={{ cursor: "pointer", fontWeight: 700 }}>📐 Architecture spec</summary>
-              <pre style={{ whiteSpace: "pre-wrap", marginTop: ".6rem", fontSize: ".85rem" }} className="jv-mono">{result.plan}</pre>
-            </details>
-          )}
-
-          {result?.files?.length > 0 && (
-            <div style={{ marginTop: "1rem" }}>
-              <div className="jv-mono jv-muted" style={{ marginBottom: ".5rem", fontSize: ".8rem" }} data-testid="build-filecount">PROJECT FILES ({result.files.length})</div>
-              <div data-testid="file-browser-tree">
-                {result.files.map((f) => (
-                  <div key={f.path} className="jv-card" style={{ marginBottom: ".4rem" }}>
-                    <div onClick={() => setOpenFile(openFile === f.path ? null : f.path)} style={{ padding: ".55rem .9rem", cursor: "pointer", display: "flex", justifyContent: "space-between" }} className="jv-mono">
-                      <span style={{ fontSize: ".82rem" }}>📄 {f.path}</span><span className="jv-muted">{openFile === f.path ? "▲" : "▼"}</span>
-                    </div>
-                    {openFile === f.path && <pre style={{ margin: 0, padding: ".8rem 1rem", borderTop: "1px solid var(--border)", overflowX: "auto", fontSize: ".78rem" }}>{f.content}</pre>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {!building && !result && apps.length > 0 && (
-            <div style={{ marginTop: "1rem" }}>
-              <div className="jv-muted jv-mono" style={{ marginBottom: ".5rem", fontSize: ".8rem" }}>YOUR PROJECTS ({apps.length})</div>
-              {apps.map((a) => (
-                <div key={a.id} className="jv-card" style={{ padding: ".7rem 1rem", marginBottom: ".5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>{a.idea.slice(0, 60)}</span>
-                  <button className="jv-btn jv-btn-ghost" onClick={() => window.open(`${API}/apps/${a.id}/zip`, "_blank")}><Download size={15} /> .zip</button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* right side panel: live agent activity */}
-        <div className="bhai-panel">
-          <div className="jv-card" style={{ padding: ".8rem" }}>
-            <div className="jv-mono jv-muted" style={{ fontSize: ".74rem", marginBottom: ".6rem", display: "flex", alignItems: "center", gap: ".4rem" }}>
-              <Users size={13} /> AGENT ACTIVITY
-            </div>
-            <AgentPanel variant="panel" />
+            ))}
           </div>
         </div>
-      </div>
+      )}
+
+      {!active && apps.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <div className="jv-muted jv-mono" style={{ marginBottom: ".5rem", fontSize: ".8rem" }}>YOUR PROJECTS ({apps.length})</div>
+          {apps.map((a) => (
+            <div key={a.id} className="jv-card" style={{ padding: ".7rem 1rem", marginBottom: ".5rem", display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
+              <span>{a.idea.slice(0, 60)}</span>
+              <div style={{ display: "flex", gap: ".4rem" }}>
+                <a className="jv-btn jv-btn-ghost" href={`${API}/apps/${a.id}/preview`} target="_blank" rel="noreferrer"><ExternalLink size={15} /></a>
+                <a className="jv-btn jv-btn-ghost" href={`${API}/apps/${a.id}/zip`}><Download size={15} /> .zip</a>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

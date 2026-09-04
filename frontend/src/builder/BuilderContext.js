@@ -9,10 +9,14 @@ export function BuilderProvider({ children }) {
   const [agentsCfg, setAgentsCfg] = useState([]);
   const [selected, setSelected] = useState({});
   const [idea, setIdea] = useState("");
+  const [extra, setExtra] = useState("");
   const [refine, setRefine] = useState("");
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState(0);
   const [agents, setAgents] = useState([]);
+  const [theme, setTheme] = useState("app");
+  const [themeLabel, setThemeLabel] = useState("");
+  const [banter, setBanter] = useState([]);
   const [result, setResult] = useState(null); // {appId, plan, files, preview_html}
   const [error, setError] = useState("");
   const [apps, setApps] = useState([]);
@@ -27,30 +31,36 @@ export function BuilderProvider({ children }) {
     http.get("/models").then(({ data }) => {
       setModelsList(data.models || []);
       setAgentsCfg(data.agents || []);
+      setAgents((data.agents || []).map((a) => ({ ...a, status: "queued", contribution: "" })));
       const init = {};
       (data.agents || []).forEach((a) => { init[a.id] = a.default_model; });
       setSelected(init);
     }).catch(() => {});
     loadApps();
+    return () => { stopRef.current = true; };
   }, [loadApps]);
 
-  const setModel = (agentId, modelId) =>
-    setSelected((s) => ({ ...s, [agentId]: modelId }));
+  const setModel = (agentId, modelId) => setSelected((s) => ({ ...s, [agentId]: modelId }));
 
   const build = async () => {
     if (!idea.trim() || building) return;
     setBuilding(true); setError(""); setResult(null); setProgress(0);
+    setBanter([]); setTheme("app"); setThemeLabel("");
     stopRef.current = false;
+    const fullIdea = extra.trim() ? `${idea}\n\nAdditional instructions:\n${extra.trim()}` : idea;
     try {
-      const { data } = await http.post("/build", { idea, models: selected });
+      const { data } = await http.post("/build", { idea: fullIdea, models: selected });
       const id = data.id;
-      setAgents(data.agents || []);
-      for (let i = 0; i < 150 && !stopRef.current; i++) {
+      if (data.agents?.length) setAgents(data.agents);
+      for (let i = 0; i < 200 && !stopRef.current; i++) {
         await new Promise((r) => setTimeout(r, 2500));
         try {
           const { data: st } = await http.get(`/apps/${id}`);
           setProgress(st.progress || 0);
           if (st.agents?.length) setAgents(st.agents);
+          if (st.theme) setTheme(st.theme);
+          if (st.theme_label) setThemeLabel(st.theme_label);
+          if (st.banter?.length) setBanter(st.banter);
           if (st.status === "done") {
             setProgress(100);
             setResult({ appId: id, plan: st.plan || "", files: st.files || [], preview_html: st.preview_html || "" });
@@ -86,8 +96,8 @@ export function BuilderProvider({ children }) {
 
   const value = {
     modelsList, agentsCfg, selected, setModel,
-    idea, setIdea, refine, setRefine,
-    building, progress, agents, result, error,
+    idea, setIdea, extra, setExtra, refine, setRefine,
+    building, progress, agents, theme, themeLabel, banter, result, error,
     apps, loadApps, build, applyRefine,
   };
   return <BuilderContext.Provider value={value}>{children}</BuilderContext.Provider>;
