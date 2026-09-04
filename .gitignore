@@ -35,6 +35,10 @@ dist
 *token.json*
 *credentials.json*
 
+.streamlit/secrets.toml
+.jarvis/
+app_preview.py
+
 # Logs and debug files
 npm-debug.log*
 yarn-debug.log*
