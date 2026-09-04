@@ -1,0 +1,42 @@
+# Jarvis Personal OS — PRD
+
+## Original Problem
+Build "Jarvis Personal OS" — a premium, secure daily AI assistant (ChatGPT/Emergent-like) with
+Google login, dark neon UI, and 5 workspaces: AI Chat & Rewriter, Email Generator, Smart Web
+Research, Image Generator, Project/App Builder. Intended domain: apnabihar.online.
+
+## Architecture (current — deployed on Emergent)
+- **Frontend**: React (CRA) at /app/frontend — dark neon "Command Center" with 5 tabs.
+- **Backend**: FastAPI at /app/backend/server.py, all routes under /api, port 8001.
+- **AI**: Emergent Universal LLM key (EMERGENT_LLM_KEY, model gpt-5.4) via emergentintegrations.
+- **Web search**: DuckDuckGo (ddgs). **Images**: Pollinations (free, client-side URL).
+- Stateless (no DB currently).
+
+### Pivot note
+The app was FIRST built as a standalone Streamlit app (/app/app.py) per the user's initial
+request to self-host on apnabihar.online. That file is retained but is NOT what Emergent deploys.
+Because Emergent deploys React+FastAPI (not Streamlit), the user saw only the default placeholder,
+so Jarvis was rebuilt natively on React+FastAPI to be usable at the emergent.host URL.
+
+## Deploy fix history
+- Backend crashed on deploy (`Router.__init__() ... 'on_startup'`): fastapi/starlette mismatch.
+  Fixed by pinning fastapi==0.128.3, starlette==0.49.2, uvicorn==0.34.0. Added /health + /api/health.
+
+## Implemented (2026-09-04)
+- AI Chat + rewrite presets (Professional / Summarize / Change Tone).
+- Email Generator (recipient/tone/context → draft + safe Copy).
+- Smart Web Research (DuckDuckGo → cited summary + sources).
+- Image Generator (Pollinations, download).
+- App Builder (LLM single-file HTML rendered live in a sandboxed iframe, with Refine).
+- Robust error states, backend 502 propagation, empty-input validation, mobile-responsive.
+- Verified: backend 100%, frontend 100% (test_reports iteration_3).
+
+## Backlog / remaining (P1/P2)
+- P1: Google login wall (Emergent-managed OAuth) — currently open access.
+- P1: Persist chat history / saved apps in MongoDB.
+- P2: Multi-file production export + GitHub/Netlify/Vercel deploy (exist in the Streamlit build).
+- P2: Distinguish DuckDuckGo outage from empty results.
+- P2: Split App.js tabs into separate component files.
+
+## Test credentials
+None (no auth yet). EMERGENT_LLM_KEY in /app/backend/.env.

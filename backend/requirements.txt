@@ -1,6 +1,8 @@
 fastapi==0.128.3
 starlette==0.49.2
 uvicorn==0.34.0
+emergentintegrations
+ddgs>=6.0.0
 boto3>=1.34.129
 requests-oauthlib>=2.0.0
 cryptography>=42.0.8

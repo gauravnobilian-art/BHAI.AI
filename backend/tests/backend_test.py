@@ -1,7 +1,5 @@
+"""Jarvis Personal OS - backend API tests (pytest)."""
 import os
-import re
-from datetime import datetime
-
 import pytest
 import requests
 from dotenv import dotenv_values
@@ -9,109 +7,126 @@ from dotenv import dotenv_values
 frontend_env = dotenv_values("/app/frontend/.env")
 base_url = os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")
 if not base_url:
-    raise RuntimeError("REACT_APP_BACKEND_URL is missing")
+    raise RuntimeError("REACT_APP_BACKEND_URL missing")
 BASE_URL = base_url.rstrip("/")
 
-ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+LONG = 180
 
 
 @pytest.fixture(scope="module")
-def api_client():
+def client():
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
     return s
 
 
-# Module: server.py root endpoint
-class TestRoot:
-    def test_root(self, api_client):
-        r = api_client.get(f"{BASE_URL}/api/", timeout=30)
-        assert r.status_code == 200, r.text
-        assert r.json() == {"message": "Hello World"}
-
-    def test_root_repeated_calls_stable(self, api_client):
-        # guards against startup/shutdown regressions (on_startup TypeError bug)
-        for _ in range(3):
-            r = api_client.get(f"{BASE_URL}/api/", timeout=30)
-            assert r.status_code == 200
-            assert r.json()["message"] == "Hello World"
-
-
-# Module: status_checks CRUD + pagination
-class TestStatusChecks:
-    def test_create_and_read_back(self, api_client):
-        name = f"TEST_client_{datetime.utcnow().timestamp()}"
-        r = api_client.post(f"{BASE_URL}/api/status", json={"client_name": name}, timeout=30)
-        assert r.status_code == 200, r.text
-        data = r.json()
-        assert isinstance(data["id"], str) and len(data["id"]) == 36
-        assert data["client_name"] == name
-        assert ISO_RE.match(data["timestamp"])
-
-        # verify persistence via paginated GET (scan a few pages)
-        found = None
-        for skip in range(0, 300, 100):
-            g = api_client.get(f"{BASE_URL}/api/status", params={"skip": skip, "limit": 100}, timeout=30)
-            assert g.status_code == 200, g.text
-            items = g.json()
-            match = [i for i in items if i["id"] == data["id"]]
-            if match:
-                found = match[0]
-                break
-            if len(items) < 100:
-                break
-        assert found is not None, "created status check not found in GET /api/status"
-        assert found["client_name"] == name
-
-    def test_list_no_mongo_id(self, api_client):
-        r = api_client.get(f"{BASE_URL}/api/status", timeout=30)
+# --- Health / root ---
+class TestHealth:
+    def test_root(self, client):
+        r = client.get(f"{BASE_URL}/api/", timeout=30)
         assert r.status_code == 200
-        items = r.json()
-        assert isinstance(items, list)
-        for i in items:
-            assert "_id" not in i
-            assert set(i.keys()) == {"id", "client_name", "timestamp"}
+        d = r.json()
+        assert d["message"] == "Jarvis Personal OS API"
+        assert d["ai"] is True
 
-    def test_pagination_limit_respected(self, api_client):
-        # seed enough rows
-        for n in range(3):
-            api_client.post(f"{BASE_URL}/api/status", json={"client_name": f"TEST_page_{n}"}, timeout=30)
-        r = api_client.get(f"{BASE_URL}/api/status", params={"skip": 0, "limit": 2}, timeout=30)
-        assert r.status_code == 200, r.text
-        assert len(r.json()) <= 2
-
-    def test_limit_capped_at_100(self, api_client):
-        r = api_client.get(f"{BASE_URL}/api/status", params={"limit": 1000}, timeout=30)
-        assert r.status_code == 200, r.text
-        assert len(r.json()) <= 100
-
-    def test_skip_offsets_results(self, api_client):
-        first = api_client.get(f"{BASE_URL}/api/status", params={"skip": 0, "limit": 2}, timeout=30).json()
-        second = api_client.get(f"{BASE_URL}/api/status", params={"skip": 1, "limit": 2}, timeout=30).json()
-        if len(first) == 2 and len(second) >= 1:
-            assert first[1]["id"] == second[0]["id"]
-
-    def test_negative_skip_and_limit_handled(self, api_client):
-        r = api_client.get(f"{BASE_URL}/api/status", params={"skip": -5, "limit": -3}, timeout=30)
-        assert r.status_code == 200, r.text
-        assert isinstance(r.json(), list)
-
-    def test_create_missing_field_422(self, api_client):
-        r = api_client.post(f"{BASE_URL}/api/status", json={}, timeout=30)
-        assert r.status_code == 422, r.text
-
-    def test_create_wrong_type_422(self, api_client):
-        r = api_client.post(f"{BASE_URL}/api/status", json={"client_name": 123}, timeout=30)
-        assert r.status_code == 422, r.text
-
-    def test_unknown_route_404(self, api_client):
-        r = api_client.get(f"{BASE_URL}/api/does-not-exist", timeout=30)
-        assert r.status_code == 404
-
-
-# Module: CORS middleware
-class TestCors:
-    def test_cors_headers(self, api_client):
-        r = api_client.get(f"{BASE_URL}/api/", headers={"Origin": "https://example.com"}, timeout=30)
+    def test_api_health(self, client):
+        r = client.get(f"{BASE_URL}/api/health", timeout=30)
         assert r.status_code == 200
-        assert "access-control-allow-origin" in {k.lower() for k in r.headers}
+        assert r.json()["status"] == "ok"
+
+
+# --- Chat (LLM) ---
+class TestChat:
+    def test_chat_basic(self, client):
+        r = client.post(f"{BASE_URL}/api/chat", json={
+            "messages": [{"role": "user", "content": "Say only the word PONG"}],
+            "style": ""}, timeout=LONG)
+        assert r.status_code == 200
+        reply = r.json()["reply"]
+        assert isinstance(reply, str) and len(reply) > 0
+        assert "AI error" not in reply and "not configured" not in reply, reply
+
+    def test_chat_style_summarize(self, client):
+        r = client.post(f"{BASE_URL}/api/chat", json={
+            "messages": [{"role": "user", "content":
+                          "Cats are mammals. They sleep a lot. They hunt mice. They purr."}],
+            "style": "summarize"}, timeout=LONG)
+        assert r.status_code == 200
+        reply = r.json()["reply"]
+        assert "AI error" not in reply, reply
+        assert len(reply) > 10
+
+    def test_chat_empty_messages(self, client):
+        # Fixed in iteration_3: empty messages must be rejected with 400
+        r = client.post(f"{BASE_URL}/api/chat", json={"messages": []}, timeout=LONG)
+        assert r.status_code == 400, r.text
+        assert "No messages" in r.json().get("detail", "")
+
+    def test_chat_validation_error(self, client):
+        r = client.post(f"{BASE_URL}/api/chat", json={"style": "professional"}, timeout=30)
+        assert r.status_code == 422
+
+
+# --- Email ---
+class TestEmail:
+    def test_email_generate(self, client):
+        r = client.post(f"{BASE_URL}/api/email", json={
+            "recipient": "Hiring Manager", "tone": "Formal",
+            "context": "TEST_ asking for an update on my job application for QA engineer"},
+            timeout=LONG)
+        assert r.status_code == 200
+        draft = r.json()["draft"]
+        assert "AI error" not in draft, draft
+        assert len(draft) > 40
+        assert "subject" in draft.lower()
+
+    def test_email_missing_context(self, client):
+        r = client.post(f"{BASE_URL}/api/email", json={"recipient": "x"}, timeout=30)
+        assert r.status_code == 422
+
+
+# --- Research (DuckDuckGo + LLM) ---
+class TestResearch:
+    def test_research(self, client):
+        r = client.post(f"{BASE_URL}/api/research",
+                        json={"query": "who is the CEO of OpenAI"}, timeout=LONG)
+        assert r.status_code == 200
+        d = r.json()
+        assert isinstance(d["summary"], str) and len(d["summary"]) > 20
+        assert "AI error" not in d["summary"], d["summary"]
+        assert isinstance(d["sources"], list)
+        if d["sources"]:
+            assert d["sources"][0]["href"].startswith("http")
+        else:
+            pytest.fail(f"No sources returned: {d['summary'][:200]}")
+
+    def test_research_validation(self, client):
+        r = client.post(f"{BASE_URL}/api/research", json={}, timeout=30)
+        assert r.status_code == 422
+
+
+# --- App Builder ---
+class TestBuild:
+    def test_build_returns_html(self, client):
+        r = client.post(f"{BASE_URL}/api/build",
+                        json={"idea": "a simple counter app with + and - buttons"},
+                        timeout=300)
+        assert r.status_code == 200
+        html = r.json()["html"]
+        assert "AI error" not in html, html[:300]
+        assert html.lower().startswith("<!doctype html")
+        assert "</html>" in html.lower()
+
+    def test_build_refine(self, client):
+        base = ("<!DOCTYPE html><html><head><title>Counter</title></head>"
+                "<body><h1 id='v'>0</h1><button onclick=\"document.getElementById('v')"
+                ".textContent=+document.getElementById('v').textContent+1\">+</button>"
+                "</body></html>")
+        r = client.post(f"{BASE_URL}/api/build", json={
+            "idea": "counter app", "refine": "add a reset button",
+            "current_html": base}, timeout=300)
+        assert r.status_code == 200
+        html = r.json()["html"]
+        assert "AI error" not in html, html[:300]
+        assert html.lower().startswith("<!doctype html")
+        assert "reset" in html.lower()
