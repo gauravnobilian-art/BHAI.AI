@@ -412,6 +412,33 @@ def load_gallery() -> List[dict]:
     return items
 
 
+# ---- built-app gallery (live App Builder) ----
+def save_app(idea: str, spec: str, html: str, app_id: str = "") -> str:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    if app_id:
+        for a in apps:
+            if a["id"] == app_id:
+                a.update({"idea": idea, "spec": spec, "html": html,
+                          "time": datetime.now(timezone.utc).isoformat()})
+                _write_json(path, apps)
+                return app_id
+    app_id = str(int(time.time() * 1000))
+    apps.insert(0, {"id": app_id, "idea": idea, "spec": spec, "html": html,
+                    "time": datetime.now(timezone.utc).isoformat()})
+    _write_json(path, apps[:30])
+    return app_id
+
+
+def load_apps() -> List[dict]:
+    return _read_json(os.path.join(_user_dir("apps"), "apps.json"), [])
+
+
+def delete_app(app_id: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    _write_json(path, [a for a in _read_json(path, []) if a["id"] != app_id])
+
+
 # ---- research history ----
 def load_research() -> List[dict]:
     return _read_json(os.path.join(_user_dir("research"), "reports.json"), [])
@@ -567,6 +594,7 @@ def promote_preview_to_live() -> tuple[bool, str]:
 
 def list_backups() -> List[dict]:
     bdir = _user_dir("backups")
+    labels = _read_json(os.path.join(bdir, "labels.json"), {})
     items = []
     for name in sorted(os.listdir(bdir), reverse=True):
         if name.startswith("app_") and name.endswith(".py"):
@@ -577,8 +605,15 @@ def list_backups() -> List[dict]:
             except ValueError:
                 when = ts
             items.append({"name": name, "path": fpath, "when": when,
-                          "size": os.path.getsize(fpath)})
+                          "label": labels.get(name, ""), "size": os.path.getsize(fpath)})
     return items
+
+
+def set_backup_label(name: str, label: str) -> None:
+    bdir = _user_dir("backups")
+    labels = _read_json(os.path.join(bdir, "labels.json"), {})
+    labels[name] = label
+    _write_json(os.path.join(bdir, "labels.json"), labels)
 
 
 def restore_backup(path: str) -> tuple[bool, str]:
@@ -1188,6 +1223,49 @@ def _render_live_preview(html: str, height: int = 520) -> None:
     components.html(html, height=height, scrolling=True)
 
 
+def _fullscreen_button(html: str) -> None:
+    """Render an anchor that opens the generated app in a new full-screen browser tab."""
+    import streamlit.components.v1 as components
+    b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
+    components.html(
+        f"""
+        <a href="data:text/html;base64,{b64}" target="_blank" rel="noopener"
+           style="display:inline-block;padding:.55rem 1rem;border-radius:12px;
+                  background:linear-gradient(135deg,#00f5d4,#7b61ff);color:#04070b;
+                  font-family:sans-serif;font-weight:700;text-decoration:none;">
+            ⛶ Open full-screen preview
+        </a>
+        """,
+        height=60,
+    )
+
+
+def deploy_configs(idea: str) -> dict:
+    """Return static-hosting deploy config files for the generated single-file app."""
+    return {
+        "netlify.toml": (
+            "# Netlify config for a static single-file app\n"
+            "[build]\n  publish = \".\"\n\n"
+            "[[redirects]]\n  from = \"/*\"\n  to = \"/index.html\"\n  status = 200\n"
+        ),
+        "vercel.json": json.dumps({
+            "version": 2,
+            "builds": [{"src": "index.html", "use": "@vercel/static"}],
+            "routes": [{"src": "/(.*)", "dest": "/index.html"}],
+        }, indent=2),
+        "DEPLOY.md": (
+            f"# Deploying \"{idea[:60]}\"\n\n"
+            "This is a self-contained static app (`index.html`). Deploy in seconds:\n\n"
+            "## Netlify (drag & drop)\n"
+            "1. Go to https://app.netlify.com/drop\n"
+            "2. Drag the folder (with `index.html` + `netlify.toml`) onto the page. Done.\n\n"
+            "## Netlify (CLI)\n```bash\nnpm i -g netlify-cli\nnetlify deploy --prod --dir .\n```\n\n"
+            "## Vercel (CLI)\n```bash\nnpm i -g vercel\nvercel --prod\n```\n\n"
+            "Both host the app for free on a public URL.\n"
+        ),
+    }
+
+
 def workspace_project() -> None:
     st.subheader("🚀 Project Agent — Live App Builder")
     st.caption("Drop an idea. Watch Jarvis plan, build and render a WORKING app live — "
@@ -1241,6 +1319,7 @@ def workspace_project() -> None:
         st.session_state["proj_files"] = _parse_files(code_raw)
         st.session_state["proj_raw"] = code_raw
         progress.progress(100, text="Done!")
+        st.session_state["active_app_id"] = save_app(idea, plan, html)
 
     # ---- Current vs Expected + live preview ----
     if st.session_state.get("live_app_html"):
@@ -1250,10 +1329,14 @@ def workspace_project() -> None:
         with left:
             st.markdown("**🟢 Current (working app)**")
             _render_live_preview(st.session_state["live_app_html"])
-            st.download_button("⬇️ Download index.html",
-                               data=st.session_state["live_app_html"],
-                               file_name="index.html", mime="text/html",
-                               key="live-html-dl")
+            lc1, lc2 = st.columns(2)
+            with lc1:
+                st.download_button("⬇️ Download index.html",
+                                   data=st.session_state["live_app_html"],
+                                   file_name="index.html", mime="text/html",
+                                   use_container_width=True, key="live-html-dl")
+            with lc2:
+                _fullscreen_button(st.session_state["live_app_html"])
         with right:
             st.markdown("**🎯 Expected (spec)**")
             with st.container(border=True, height=520):
@@ -1270,7 +1353,29 @@ def workspace_project() -> None:
                     st.session_state["live_app_html"] = generate_live_app(
                         idea, refine, st.session_state["live_app_html"])
                     status.update(label="✅ Updated — preview refreshed", state="complete")
+                st.session_state["active_app_id"] = save_app(
+                    idea, st.session_state.get("proj_plan", ""),
+                    st.session_state["live_app_html"], st.session_state.get("active_app_id", ""))
                 st.rerun()
+
+        # ---- deploy helper ----
+        with st.expander("🚀 Deploy this app (Netlify / Vercel)"):
+            st.caption("Your app is a self-contained static file — deploy it free in seconds.")
+            cfgs = deploy_configs(idea)
+            dbuf = io.BytesIO()
+            with zipfile.ZipFile(dbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("index.html", st.session_state["live_app_html"])
+                for fname, content in cfgs.items():
+                    zf.writestr(fname, content)
+            st.download_button("⬇️ Download deploy bundle (.zip)", data=dbuf.getvalue(),
+                               file_name="jarvis-deploy.zip", mime="application/zip",
+                               key="deploy-zip")
+            st.markdown("**Netlify:** drag the unzipped folder onto "
+                        "[app.netlify.com/drop](https://app.netlify.com/drop) — instant live URL.")
+            st.markdown("**Vercel:** run `vercel --prod` inside the unzipped folder.")
+            for fname, content in cfgs.items():
+                with st.popover(f"📄 {fname}"):
+                    st.code(content, language="json" if fname.endswith(".json") else "text")
 
     # ---- production files ----
     if st.session_state.get("proj_files"):
@@ -1302,6 +1407,26 @@ def workspace_project() -> None:
                 st.download_button("⬇️ Download", data=f["code"],
                                    file_name=f["path"].split("/")[-1],
                                    key=f"dl-{f['path']}")
+
+    # ---- saved apps gallery ----
+    apps = load_apps()
+    if apps:
+        st.divider()
+        st.markdown(f"#### 🗂️ Your Apps ({len(apps)})")
+        st.caption("Reopen any app to keep iterating on it.")
+        for a in apps:
+            with st.container(border=True):
+                ac1, ac2, ac3 = st.columns([3, 1, 1])
+                ac1.markdown(f"**{a['idea'][:70]}**  \n_{a['time'][:16].replace('T',' ')} UTC_")
+                if ac2.button("📂 Open", key=f"app-open-{a['id']}", use_container_width=True):
+                    st.session_state["live_app_html"] = a["html"]
+                    st.session_state["proj_plan"] = a.get("spec", "")
+                    st.session_state["active_app_id"] = a["id"]
+                    st.session_state["proj-idea"] = a["idea"]
+                    st.rerun()
+                if ac3.button("🗑️ Delete", key=f"app-del-{a['id']}", use_container_width=True):
+                    delete_app(a["id"])
+                    st.rerun()
 
 
 # ----------------------------------------------------------------------------- #
@@ -1593,10 +1718,14 @@ def workspace_upgrade() -> None:
                 with st.popover("🚀 Promote preview to live", use_container_width=True):
                     st.warning("This replaces your live `app.py` (a timestamped backup is saved "
                                "first). The app will reload.", icon="⚠️")
+                    label = st.text_input("Label this backup (optional)", key="promote-label",
+                                          placeholder="e.g. before dark-mode change")
                     if st.checkbox("I've previewed it and want to go live", key="promote-confirm"):
                         if st.button("Confirm promote", key="promote-go"):
                             ok, info = promote_preview_to_live()
                             if ok:
+                                if label.strip():
+                                    set_backup_label(os.path.basename(info), label.strip())
                                 st.success(f"Live app updated. Backup: `{os.path.basename(info)}`")
                             else:
                                 st.error(info)
@@ -1620,14 +1749,23 @@ def workspace_upgrade() -> None:
         st.caption("Restore your live app to any previous version. The current app is snapshotted "
                    "before restoring, so you can always go back.")
         for b in backups:
-            rc1, rc2 = st.columns([3, 1])
-            rc1.markdown(f"🗄️ **{b['when']}**  ·  {b['size']//1000} KB")
-            if rc2.button("↩️ Restore", key=f"rollback-{b['name']}", use_container_width=True):
-                ok, msg = restore_backup(b["path"])
-                if ok:
-                    st.success(f"Restored to {b['when']}. App will reload.")
-                else:
-                    st.error(msg)
+            with st.container(border=True):
+                title = f"🏷️ **{b['label']}**  ·  " if b["label"] else "🗄️ "
+                rc1, rc2 = st.columns([3, 1])
+                rc1.markdown(f"{title}{b['when']}  ·  {b['size']//1000} KB")
+                if rc2.button("↩️ Restore", key=f"rollback-{b['name']}", use_container_width=True):
+                    ok, msg = restore_backup(b["path"])
+                    if ok:
+                        st.success(f"Restored to {b['when']}. App will reload.")
+                    else:
+                        st.error(msg)
+                lc1, lc2 = st.columns([3, 1])
+                new_label = lc1.text_input("Label", value=b["label"], key=f"blabel-{b['name']}",
+                                           label_visibility="collapsed",
+                                           placeholder="Name this backup…")
+                if lc2.button("Save", key=f"blabel-save-{b['name']}", use_container_width=True):
+                    set_backup_label(b["name"], new_label.strip())
+                    st.rerun()
 
 
 # ----------------------------------------------------------------------------- #
