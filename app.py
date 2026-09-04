@@ -353,6 +353,12 @@ def _user_dir(sub: str) -> str:
     return path
 
 
+def _shared_path(name: str) -> str:
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".jarvis")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, name)
+
+
 def _read_json(path: str, default):
     if os.path.exists(path):
         try:
@@ -479,6 +485,27 @@ def set_version_note(app_id: str, version_index: int, note: str) -> None:
         if a["id"] == app_id and 0 <= version_index < len(a.get("versions", [])):
             a["versions"][version_index]["note"] = note
     _write_json(path, apps)
+
+
+def add_deploy_record(app_id: str, provider: str, url: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    for a in apps:
+        if a["id"] == app_id:
+            a.setdefault("deploys", [])
+            a["deploys"].insert(0, {"provider": provider, "url": url,
+                                    "time": datetime.now(timezone.utc).isoformat()})
+            a["deploys"] = a["deploys"][:40]
+    _write_json(path, apps)
+
+
+# ---- global access allow-list (owner-defined) ----
+def load_allowed() -> List[str]:
+    return _read_json(_shared_path("allowed_users.json"), [])
+
+
+def save_allowed(emails: List[str]) -> None:
+    _write_json(_shared_path("allowed_users.json"), emails)
 
 
 # ---- research history ----
@@ -840,6 +867,34 @@ def render_sidebar() -> None:
         pending = load_pending()
         if pending:
             st.warning(f"🔔 {len(pending)} upgrade(s) to review in Self-Upgrade tab.", icon="🧬")
+
+        st.divider()
+        with st.expander("🔒 Access control"):
+            allowed = load_allowed()
+            if allowed:
+                st.caption("Only these Google emails can access Jarvis:")
+                for em in allowed:
+                    ac1, ac2 = st.columns([3, 1])
+                    ac1.markdown(f"• {em}")
+                    if ac2.button("✖", key=f"allow-rm-{em}"):
+                        save_allowed([x for x in allowed if x != em])
+                        st.rerun()
+            else:
+                st.caption("Open to any Google account. Add an email to lock it down.")
+            new_email = st.text_input("Add allowed email", key="allow-add",
+                                      placeholder="person@gmail.com")
+            b1, b2 = st.columns(2)
+            if b1.button("➕ Add", key="allow-add-btn", use_container_width=True):
+                if new_email.strip():
+                    save_allowed(sorted(set(allowed + [new_email.strip()])))
+                    st.rerun()
+            my_email = getattr(st.user, "email", "")
+            if my_email and my_email not in allowed and b2.button(
+                    "➕ Add me", key="allow-add-me", use_container_width=True):
+                save_allowed(sorted(set(allowed + [my_email])))
+                st.rerun()
+            if allowed:
+                st.caption("⚠️ Add your own email before logging out, or you'll be locked out.")
 
 
 # ----------------------------------------------------------------------------- #
@@ -1285,6 +1340,24 @@ def _fullscreen_button(html: str) -> None:
     )
 
 
+def _inject_screenshot(html: str) -> str:
+    """Inject html2canvas + a floating capture button into the app so users can save a PNG."""
+    tool = (
+        '<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/'
+        'html2canvas.min.js"></script>'
+        '<button onclick="html2canvas(document.body,{useCORS:true}).then(function(c){'
+        'var a=document.createElement(\'a\');a.href=c.toDataURL(\'image/png\');'
+        'a.download=\'jarvis-app.png\';a.click();});" '
+        'style="position:fixed;bottom:14px;right:14px;z-index:99999;padding:10px 14px;'
+        'border:none;border-radius:12px;cursor:pointer;font-family:sans-serif;font-weight:700;'
+        'background:linear-gradient(135deg,#00f5d4,#7b61ff);color:#04070b;">📸 Save PNG</button>'
+    )
+    if "</body>" in html.lower():
+        idx = html.lower().rfind("</body>")
+        return html[:idx] + tool + html[idx:]
+    return html + tool
+
+
 def deploy_configs(idea: str) -> dict:
     """Return static-hosting deploy config files for the generated single-file app."""
     return {
@@ -1452,10 +1525,18 @@ def workspace_project() -> None:
         device = st.radio("Preview device", list(devices.keys()), horizontal=True,
                           key="preview-device", label_visibility="collapsed")
         dw, dh = devices[device]
+        shot = st.checkbox("📸 Screenshot mode (adds a Save-PNG button inside the preview)",
+                          key="screenshot-mode")
         left, right = st.columns([3, 2])
         with left:
             st.markdown("**🟢 Current (working app)**")
-            _render_live_preview(st.session_state["live_app_html"], height=dh, width=dw)
+            preview_html = st.session_state["live_app_html"]
+            if shot:
+                preview_html = _inject_screenshot(preview_html)
+            _render_live_preview(preview_html, height=dh, width=dw)
+            if shot:
+                st.caption("Click the 📸 Save PNG button inside the preview (bottom-right) "
+                           "to download a snapshot.")
             lc1, lc2 = st.columns(2)
             with lc1:
                 st.download_button("⬇️ Download index.html",
@@ -1513,6 +1594,7 @@ def workspace_project() -> None:
                         if ok:
                             if active_id:
                                 set_app_netlify_site(active_id, site_id, res)
+                                add_deploy_record(active_id, "Netlify", res)
                             st.success(f"🎉 Live at: {res}")
                             st.markdown(f"[Open your live app →]({res})")
                             st.rerun()
@@ -1559,11 +1641,21 @@ def workspace_project() -> None:
                         if ok:
                             if active_id:
                                 set_app_vercel(active_id, pname, res)
+                                add_deploy_record(active_id, "Vercel", res)
                             st.success(f"🎉 Live at: {res}")
                             st.markdown(f"[Open your live app →]({res})")
                             st.rerun()
                         else:
                             st.error(f"Deploy failed: {res}")
+
+            # ---- deploy history ----
+            hist = existing.get("deploys", [])
+            if hist:
+                st.divider()
+                st.markdown("**📜 Deploy history**")
+                for h in hist:
+                    st.markdown(f"- `{h['time'][:16].replace('T',' ')}` · **{h['provider']}** · "
+                                f"[{h['url']}]({h['url']})")
 
             st.divider()
             cfgs = deploy_configs(idea)
@@ -2040,6 +2132,18 @@ def workspace_upgrade() -> None:
 def main() -> None:
     if not is_authenticated():
         login_screen()
+        return
+
+    # access control: if an allow-list exists, only listed emails may enter
+    allowed = load_allowed()
+    email = (getattr(st.user, "email", "") or "").lower()
+    if allowed and email not in [a.lower() for a in allowed]:
+        inject_css()
+        st.error("🔒 Access restricted. Your Google account is not on the allow-list "
+                 "for this Jarvis instance.")
+        st.caption(f"Signed in as {email}. Ask the owner to add you.")
+        if st.button("Log out", key="denied-logout"):
+            st.logout()
         return
 
     inject_css()

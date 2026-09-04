@@ -36,6 +36,8 @@ dist
 *credentials.json*
 
 .streamlit/secrets.toml
+.streamlit/secrets.local.toml
+.streamlit/secrets.prod.bak
 .jarvis/
 app_preview.py
 
