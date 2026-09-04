@@ -1,0 +1,32 @@
+{
+  "summary": "Backend-only regression test after fastapi/starlette/uvicorn upgrade (fastapi 0.128.3, starlette 0.49.2, uvicorn 0.34.0). Verified installed versions, supervisor status, and backend logs: no 'Router.__init__() got an unexpected keyword argument on_startup' TypeError; 'Application startup complete' on every reload. Created pytest suite (12 tests) hitting the public REACT_APP_BACKEND_URL: GET /api/ returns 200 {\"message\":\"Hello World\"}, POST /api/status persists and returns id(uuid4)/client_name/timestamp, GET /api/status verified persistence read-back, no MongoDB _id leakage, pagination (skip/limit) works, limit capped at 100, negative skip/limit handled, 422 validation for missing/wrong-typed client_name, 404 for unknown /api route, CORS header present. All 12 tests pass (100%).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /health (port 8001)", "issue": "No /health route exists on the backend; localhost:8001/health returns 404 (server responds, so TCP health checks pass, but a path-based 200 health check would fail). Consider adding a lightweight /api/health (and/or /health) endpoint."},
+      {"endpoint": "app startup/shutdown", "issue": "@app.on_event(\"shutdown\") is deprecated in FastAPI 0.128/Starlette 0.49; works today but should migrate to the lifespan context manager to avoid future breakage."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Optional: add a /api/health endpoint returning 200 for path-based deployment health checks.",
+    "Optional: replace deprecated @app.on_event('shutdown') with FastAPI lifespan handler."
+  ],
+  "critical_code_review_comments": [
+    "GET /api/status has no deterministic sort; results depend on natural Mongo order, so skip/limit pagination can be unstable under concurrent inserts. Add .sort('timestamp', -1) or sort by _id.",
+    "requirements.txt pins fastapi/starlette/uvicorn but leaves sse-starlette/streamlit unpinned (streamlit app at /app/app.py). Pin or isolate those deps so a future install cannot again drag in an incompatible Starlette.",
+    "POST /api/status stores timestamp as an ISO string rather than a BSON date, which prevents range/date queries and index efficiency."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Inserted a few status_checks docs prefixed TEST_ into the configured DB (collection status_checks); no delete endpoint exists so they remain.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Regression suite at /app/backend/tests/backend_test.py covers root + status CRUD/pagination/validation/CORS against the public URL. Note /openapi.json is not reachable via the public ingress (only /api/* routes are proxied to 8001) — do not assert on it externally. Frontend was intentionally not tested.",
+  "rca_of_the_issue": "Original crash was fastapi==0.110.1 combined with an unpinned newer starlette (>=0.46 pulled by streamlit/sse-starlette); Starlette removed Router's on_startup kwarg handling used by old FastAPI. Fix (pinning fastapi 0.128.3 + starlette 0.49.2 + uvicorn 0.34.0) is confirmed effective: startup is clean and all API endpoints work end to end."
+}

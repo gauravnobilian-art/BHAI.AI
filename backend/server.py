@@ -42,6 +42,14 @@ class StatusCheckCreate(BaseModel):
 async def root():
     return {"message": "Hello World"}
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@api_router.get("/health")
+async def api_health():
+    return {"status": "ok"}
+
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
     status_dict = input.model_dump()
@@ -55,15 +63,18 @@ async def create_status_check(input: StatusCheckCreate):
     return status_obj
 
 @api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
+async def get_status_checks(skip: int = 0, limit: int = 100):
+    # Paginated query; cap limit to protect memory as the collection grows
+    limit = min(max(limit, 1), 100)
+    status_checks = await db.status_checks.find(
+        {}, {"_id": 0, "id": 1, "client_name": 1, "timestamp": 1}
+    ).skip(max(skip, 0)).limit(limit).to_list(limit)
+
     # Convert ISO string timestamps back to datetime objects
     for check in status_checks:
         if isinstance(check['timestamp'], str):
             check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
+
     return status_checks
 
 # Include the router in the main app
