@@ -19,10 +19,14 @@ Deploy:           point https://apnabihar.online at this app (see README.md)
 
 from __future__ import annotations
 
-import base64
+import hashlib
 import io
+import json
+import os
 import time
 import urllib.parse
+import zipfile
+from datetime import datetime, timezone
 from typing import Generator, List
 
 import requests
@@ -39,16 +43,23 @@ PROVIDERS = {
     "Groq": {
         "base_url": "https://api.groq.com/openai/v1/chat/completions",
         "model": "llama-3.3-70b-specdec",
+        "stt_url": "https://api.groq.com/openai/v1/audio/transcriptions",
+        "stt_model": "whisper-large-v3",
         "signup": "https://console.groq.com/keys",
     },
     "SambaNova": {
         "base_url": "https://api.sambanova.ai/v1/chat/completions",
         "model": "Meta-Llama-3.3-70B-Instruct",
+        "stt_url": "https://api.sambanova.ai/v1/audio/transcriptions",
+        "stt_model": "Whisper-Large-v3",
         "signup": "https://cloud.sambanova.ai/apis",
     },
 }
 
 POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{prompt}"
+
+# Directory for persisted per-user chat history (survives restarts).
+HISTORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".jarvis", "history")
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -303,6 +314,111 @@ def web_search(query: str, max_results: int = 6) -> List[dict]:
 
 
 # ----------------------------------------------------------------------------- #
+#  Speech-to-text  (voice input via provider Whisper endpoint)
+# ----------------------------------------------------------------------------- #
+
+def transcribe_audio(audio_bytes: bytes) -> str:
+    provider = st.session_state.get("provider", "Groq")
+    api_key = st.session_state.get("llm_key", "").strip()
+    if not api_key:
+        return ""
+    cfg = PROVIDERS[provider]
+    try:
+        resp = requests.post(
+            cfg["stt_url"],
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": ("voice.wav", audio_bytes, "audio/wav")},
+            data={"model": cfg["stt_model"]},
+            timeout=90,
+        )
+        if resp.status_code != 200:
+            st.error(f"Transcription error {resp.status_code}: {resp.text[:200]}")
+            return ""
+        return resp.json().get("text", "").strip()
+    except requests.exceptions.RequestException as exc:
+        st.error(f"Voice transcription failed: {exc}")
+        return ""
+
+
+# ----------------------------------------------------------------------------- #
+#  Persistent chat history  (per-user, file backed)
+# ----------------------------------------------------------------------------- #
+
+def _history_path() -> str:
+    email = getattr(st.user, "email", "anon") or "anon"
+    key = hashlib.sha256(email.encode()).hexdigest()[:16]
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    return os.path.join(HISTORY_DIR, f"{key}.json")
+
+
+def load_conversations() -> List[dict]:
+    path = _history_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (ValueError, OSError):
+            return []
+    return []
+
+
+def save_conversations(conversations: List[dict]) -> None:
+    try:
+        with open(_history_path(), "w", encoding="utf-8") as fh:
+            json.dump(conversations, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------------------------------- #
+#  PDF export  (research summaries)
+# ----------------------------------------------------------------------------- #
+
+def build_pdf(title: str, body: str, sources: List[dict]) -> bytes:
+    from fpdf import FPDF
+    from fpdf.enums import XPos, YPos
+
+    def latin(text: str) -> str:
+        return text.encode("latin-1", "replace").decode("latin-1")
+
+    pdf = FPDF()
+    pdf.set_margins(15, 15, 15)
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    w = pdf.epw  # effective page width
+
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(w, 9, latin(title), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(1)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.multi_cell(w, 6, latin(f"Jarvis Personal OS | {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"),
+                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(6)
+
+    pdf.set_text_color(20, 20, 20)
+    pdf.set_font("Helvetica", "", 11)
+    for line in body.split("\n"):
+        if line.strip():
+            pdf.multi_cell(w, 6, latin(line), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            pdf.ln(4)
+
+    if sources:
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.multi_cell(w, 7, "Sources", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(60, 60, 160)
+        for i, s in enumerate(sources):
+            pdf.multi_cell(w, 5, latin(f"[{i+1}] {s.get('title','')} - {s.get('href','')}"),
+                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    out = pdf.output()
+    return bytes(out)
+
+
+# ----------------------------------------------------------------------------- #
 #  Sidebar — profile + credentials
 # ----------------------------------------------------------------------------- #
 
@@ -358,13 +474,65 @@ def render_sidebar() -> None:
 #  Workspace 1 — AI Chat & Rewriter
 # ----------------------------------------------------------------------------- #
 
+def _new_conversation() -> dict:
+    return {"id": str(int(time.time() * 1000)),
+            "title": "New chat",
+            "created": datetime.now(timezone.utc).isoformat(),
+            "messages": []}
+
+
 def workspace_chat() -> None:
     st.subheader("💬 AI Chat & Rewriter")
-    st.caption("Talk to Jarvis or transform any text with one click.")
+    st.caption("Talk to Jarvis or transform any text with one click. Conversations are saved.")
 
-    if "chat" not in st.session_state:
-        st.session_state.chat = []
+    # ---- load persisted conversations once per session ----
+    if "conversations" not in st.session_state:
+        st.session_state.conversations = load_conversations()
+    if "active_conv" not in st.session_state:
+        if st.session_state.conversations:
+            st.session_state.active_conv = st.session_state.conversations[0]["id"]
+        else:
+            conv = _new_conversation()
+            st.session_state.conversations = [conv]
+            st.session_state.active_conv = conv["id"]
 
+    def _get_active() -> dict:
+        for c in st.session_state.conversations:
+            if c["id"] == st.session_state.active_conv:
+                return c
+        st.session_state.active_conv = st.session_state.conversations[0]["id"]
+        return st.session_state.conversations[0]
+
+    # ---- conversation manager ----
+    top = st.columns([3, 1, 1])
+    labels = {c["id"]: f"{c['title']}  ·  {c['created'][:10]}"
+              for c in st.session_state.conversations}
+    ids = list(labels.keys())
+    selected = top[0].selectbox(
+        "Conversation", ids,
+        index=ids.index(st.session_state.active_conv) if st.session_state.active_conv in ids else 0,
+        format_func=lambda i: labels.get(i, "chat"),
+        key="conv-picker", label_visibility="collapsed",
+    )
+    st.session_state.active_conv = selected
+    if top[1].button("➕ New", use_container_width=True, key="new-chat"):
+        conv = _new_conversation()
+        st.session_state.conversations.insert(0, conv)
+        st.session_state.active_conv = conv["id"]
+        save_conversations(st.session_state.conversations)
+        st.rerun()
+    if top[2].button("🗑️ Delete", use_container_width=True, key="del-chat"):
+        st.session_state.conversations = [
+            c for c in st.session_state.conversations if c["id"] != st.session_state.active_conv]
+        if not st.session_state.conversations:
+            st.session_state.conversations = [_new_conversation()]
+        st.session_state.active_conv = st.session_state.conversations[0]["id"]
+        save_conversations(st.session_state.conversations)
+        st.rerun()
+
+    active = _get_active()
+
+    # ---- rewriter presets ----
     presets = {
         "✍️ Make it Professional": "Rewrite the following text to be clear, professional and polished. Keep the meaning:\n\n",
         "📝 Summarize Text": "Summarize the following text into concise bullet points capturing the key ideas:\n\n",
@@ -375,38 +543,49 @@ def workspace_chat() -> None:
         if col.button(label, use_container_width=True, key=f"preset-{label}"):
             st.session_state["preset_prefix"] = prefix
             st.session_state["preset_label"] = label
-
     if st.session_state.get("preset_prefix"):
         st.info(f"Preset active: **{st.session_state['preset_label']}** — "
-                "type or paste your text below.", icon="⚡")
+                "type, paste or speak your text below.", icon="⚡")
 
-    for msg in st.session_state.chat:
+    # ---- transcript ----
+    for msg in active["messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    prompt = st.chat_input("Message Jarvis…")
+    # ---- voice input ----
+    voice_text = ""
+    with st.expander("🎙️ Voice input"):
+        audio = st.audio_input("Record a message", key=f"mic-{active['id']}")
+        if audio is not None and st.button("Transcribe & send", key="voice-send"):
+            with st.spinner("Transcribing…"):
+                voice_text = transcribe_audio(audio.getvalue())
+            if not voice_text:
+                st.warning("Could not transcribe (check your LLM key supports Whisper).")
+
+    prompt = st.chat_input("Message Jarvis…") or voice_text
     if prompt:
         prefix = st.session_state.pop("preset_prefix", "")
         st.session_state.pop("preset_label", None)
         full_prompt = f"{prefix}{prompt}" if prefix else prompt
 
-        st.session_state.chat.append({"role": "user", "content": prompt})
+        active["messages"].append({"role": "user", "content": prompt})
+        if active["title"] == "New chat":
+            active["title"] = (prompt[:40] + "…") if len(prompt) > 40 else prompt
         with st.chat_message("user"):
             st.markdown(prompt)
 
         history = [{"role": "system",
                     "content": "You are Jarvis, a sharp, concise personal assistant."}]
         history += [{"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.chat[:-1]]
+                    for m in active["messages"][:-1]]
         history.append({"role": "user", "content": full_prompt})
 
         with st.chat_message("assistant"):
             reply = st.write_stream(llm_stream(history))
-        st.session_state.chat.append({"role": "assistant", "content": reply})
-
-    if st.session_state.chat and st.button("🗑️ Clear chat", key="clear-chat"):
-        st.session_state.chat = []
-        st.rerun()
+        active["messages"].append({"role": "assistant", "content": reply})
+        save_conversations(st.session_state.conversations)
+        if voice_text:
+            st.rerun()
 
 
 # ----------------------------------------------------------------------------- #
@@ -491,8 +670,21 @@ def workspace_research() -> None:
         with st.container(border=True):
             st.markdown(summary)
 
+        st.session_state["research_summary"] = summary
+        st.session_state["research_sources"] = results
+        st.session_state["research_query"] = query
+
+    if st.session_state.get("research_summary"):
+        pdf_bytes = build_pdf(
+            f"Research: {st.session_state.get('research_query','')}",
+            st.session_state["research_summary"],
+            st.session_state.get("research_sources", []),
+        )
+        st.download_button("📄 Save as PDF", data=pdf_bytes,
+                           file_name="jarvis-research.pdf", mime="application/pdf",
+                           key="research-pdf")
         with st.expander("🔗 Sources"):
-            for i, r in enumerate(results):
+            for i, r in enumerate(st.session_state.get("research_sources", [])):
                 st.markdown(f"**[{i+1}] {r.get('title','')}**  \n{r.get('href','')}")
 
 
@@ -597,7 +789,17 @@ def workspace_project() -> None:
 
     if st.session_state.get("proj_files"):
         files = st.session_state["proj_files"]
-        st.markdown(f"#### 📦 Generated files ({len(files)})")
+        head = st.columns([3, 1])
+        head[0].markdown(f"#### 📦 Generated files ({len(files)})")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in files:
+                zf.writestr(f["path"], f["code"])
+            if st.session_state.get("proj_plan"):
+                zf.writestr("PLAN.md", st.session_state["proj_plan"])
+        head[1].download_button("⬇️ Download ZIP", data=buf.getvalue(),
+                                file_name="jarvis-project.zip", mime="application/zip",
+                                use_container_width=True, key="proj-zip")
         for f in files:
             with st.expander(f"📄 {f['path']}"):
                 lang = f["path"].split(".")[-1] if "." in f["path"] else "text"
