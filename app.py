@@ -499,13 +499,62 @@ def add_deploy_record(app_id: str, provider: str, url: str) -> None:
     _write_json(path, apps)
 
 
-# ---- global access allow-list (owner-defined) ----
-def load_allowed() -> List[str]:
-    return _read_json(_shared_path("allowed_users.json"), [])
+# ---- global access allow-list with roles (owner-defined) ----
+def load_allowed() -> List[dict]:
+    raw = _read_json(_shared_path("allowed_users.json"), [])
+    out = []
+    for item in raw:
+        if isinstance(item, str):
+            out.append({"email": item, "role": "builder"})
+        elif isinstance(item, dict) and item.get("email"):
+            out.append({"email": item["email"], "role": item.get("role", "builder")})
+    return out
 
 
-def save_allowed(emails: List[str]) -> None:
-    _write_json(_shared_path("allowed_users.json"), emails)
+def save_allowed(entries: List[dict]) -> None:
+    _write_json(_shared_path("allowed_users.json"), entries)
+
+
+def allowed_emails() -> List[str]:
+    return [e["email"].lower() for e in load_allowed()]
+
+
+def user_role(email: str) -> str:
+    email = (email or "").lower()
+    for e in load_allowed():
+        if e["email"].lower() == email:
+            return e.get("role", "builder")
+    return "builder"  # open access when not restricted
+
+
+def set_app_domain(app_id: str, domain: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    for a in apps:
+        if a["id"] == app_id:
+            a["custom_domain"] = domain
+    _write_json(path, apps)
+
+
+def domain_status(domain: str) -> dict:
+    """Check whether a custom domain resolves (DNS) and serves HTTPS (SSL live)."""
+    import socket
+    result = {"dns_ok": False, "https_ok": False, "detail": ""}
+    try:
+        socket.gethostbyname(domain)
+        result["dns_ok"] = True
+    except OSError:
+        result["detail"] = "DNS not resolving yet."
+        return result
+    try:
+        r = requests.get(f"https://{domain}", timeout=8)
+        result["https_ok"] = r.status_code < 500
+        result["detail"] = f"HTTPS responded {r.status_code}."
+    except requests.exceptions.SSLError:
+        result["detail"] = "DNS resolves, but SSL not provisioned yet."
+    except requests.exceptions.RequestException as exc:
+        result["detail"] = f"DNS resolves; HTTPS not reachable yet ({type(exc).__name__})."
+    return result
 
 
 # ---- research history ----
@@ -872,29 +921,46 @@ def render_sidebar() -> None:
         with st.expander("🔒 Access control"):
             allowed = load_allowed()
             if allowed:
-                st.caption("Only these Google emails can access Jarvis:")
-                for em in allowed:
-                    ac1, ac2 = st.columns([3, 1])
-                    ac1.markdown(f"• {em}")
-                    if ac2.button("✖", key=f"allow-rm-{em}"):
-                        save_allowed([x for x in allowed if x != em])
+                st.caption("Only these accounts can access Jarvis:")
+                for e in allowed:
+                    ac1, ac2, ac3 = st.columns([3, 2, 1])
+                    ac1.markdown(f"• {e['email']}")
+                    role = ac2.selectbox("role", ["builder", "viewer"],
+                                         index=0 if e.get("role") == "builder" else 1,
+                                         key=f"role-{e['email']}", label_visibility="collapsed")
+                    if role != e.get("role"):
+                        for x in allowed:
+                            if x["email"] == e["email"]:
+                                x["role"] = role
+                        save_allowed(allowed)
                         st.rerun()
+                    if ac3.button("✖", key=f"allow-rm-{e['email']}"):
+                        save_allowed([x for x in allowed if x["email"] != e["email"]])
+                        st.rerun()
+                st.caption("**builder** = full access · **viewer** = use tools but cannot "
+                           "build or deploy apps.")
             else:
                 st.caption("Open to any Google account. Add an email to lock it down.")
             new_email = st.text_input("Add allowed email", key="allow-add",
                                       placeholder="person@gmail.com")
+            new_role = st.selectbox("Role for new user", ["builder", "viewer"], key="allow-role")
             b1, b2 = st.columns(2)
             if b1.button("➕ Add", key="allow-add-btn", use_container_width=True):
                 if new_email.strip():
-                    save_allowed(sorted(set(allowed + [new_email.strip()])))
+                    emails = [e["email"] for e in allowed]
+                    if new_email.strip() not in emails:
+                        allowed.append({"email": new_email.strip(), "role": new_role})
+                        save_allowed(allowed)
                     st.rerun()
             my_email = getattr(st.user, "email", "")
-            if my_email and my_email not in allowed and b2.button(
+            if my_email and my_email not in [e["email"] for e in allowed] and b2.button(
                     "➕ Add me", key="allow-add-me", use_container_width=True):
-                save_allowed(sorted(set(allowed + [my_email])))
+                allowed.append({"email": my_email, "role": "builder"})
+                save_allowed(allowed)
                 st.rerun()
             if allowed:
-                st.caption("⚠️ Add your own email before logging out, or you'll be locked out.")
+                st.caption("⚠️ Add yourself as **builder** before logging out, or you'll be "
+                           "locked out.")
 
 
 # ----------------------------------------------------------------------------- #
@@ -1467,11 +1533,16 @@ def workspace_project() -> None:
     st.caption("Drop an idea. Watch Jarvis plan, build and render a WORKING app live — "
                "then download the production files.")
 
+    is_viewer = st.session_state.get("role") == "viewer"
+    if is_viewer:
+        st.info("👀 You have **viewer** access — you can open and preview apps, but building "
+                "and deploying are disabled. Ask an admin for builder access.", icon="🔒")
+
     idea = st.text_area("Your app idea",
                         placeholder="e.g. A habit tracker with streaks, charts and dark mode",
-                        height=90, key="proj-idea")
+                        height=90, key="proj-idea", disabled=is_viewer)
 
-    if st.button("🤖 Build it live", key="proj-run"):
+    if st.button("🤖 Build it live", key="proj-run", disabled=is_viewer):
         if not idea.strip():
             st.warning("Describe your idea first.", icon="⚠️")
             return
@@ -1555,7 +1626,7 @@ def workspace_project() -> None:
         refine = st.text_input("Describe a change",
                                placeholder="e.g. add a dark mode toggle and a summary chart",
                                key="proj-refine")
-        if st.button("🔁 Apply change & re-render", key="proj-refine-btn"):
+        if st.button("🔁 Apply change & re-render", key="proj-refine-btn", disabled=is_viewer):
             if refine.strip():
                 with st.status("👨‍💻 Applying your change…", expanded=False) as status:
                     st.session_state["live_app_html"] = generate_live_app(
@@ -1569,6 +1640,8 @@ def workspace_project() -> None:
 
         # ---- deploy helper ----
         with st.expander("🚀 Deploy this app (Netlify / Vercel)"):
+            if is_viewer:
+                st.info("Deploying is disabled for viewers.", icon="🔒")
             st.caption("Your app is a self-contained static file — deploy it free in seconds.")
             active_id = st.session_state.get("active_app_id", "")
             existing = next((a for a in load_apps() if a["id"] == active_id), {})
@@ -1583,7 +1656,7 @@ def workspace_project() -> None:
                                            "Personal access tokens.")
                 if existing.get("deployed_url"):
                     st.success(f"Live at: {existing['deployed_url']}")
-                if st.button("🚀 Deploy to Netlify now", key="netlify-deploy"):
+                if st.button("🚀 Deploy to Netlify now", key="netlify-deploy", disabled=is_viewer):
                     if not token.strip():
                         st.warning("Paste your Netlify token first.", icon="⚠️")
                     else:
@@ -1615,13 +1688,30 @@ def workspace_project() -> None:
                         ok, res = add_netlify_domain(token.strip(),
                                                      existing["netlify_site_id"], domain)
                         if ok:
+                            if active_id:
+                                set_app_domain(active_id, domain)
                             st.success(f"Domain attached: {domain}")
                             st.info(f"Final step — add this DNS record at your domain host:\n\n"
                                     f"`CNAME  {sub.strip()}  →  {existing['netlify_site_id']}"
                                     ".netlify.app`\n\n(or point it to your Netlify site's URL). "
                                     "SSL provisions automatically once DNS resolves.", icon="🧭")
+                            st.rerun()
                         else:
                             st.error(res)
+
+                # domain status checker
+                cur_domain = existing.get("custom_domain")
+                if cur_domain:
+                    st.markdown(f"**Domain:** `{cur_domain}`")
+                    if st.button("🔎 Check DNS / SSL status", key="domain-status-btn"):
+                        with st.spinner("Checking domain…"):
+                            stt = domain_status(cur_domain)
+                        d1, d2 = st.columns(2)
+                        d1.markdown(("🟢 DNS resolving" if stt["dns_ok"]
+                                     else "🔴 DNS not resolving"))
+                        d2.markdown(("🟢 HTTPS / SSL live" if stt["https_ok"]
+                                     else "🟡 SSL pending"))
+                        st.caption(stt["detail"])
 
             # --- Vercel ---
             with dtabs[1]:
@@ -1630,7 +1720,7 @@ def workspace_project() -> None:
                                        help="vercel.com → Settings → Tokens.")
                 if existing.get("deployed_url_vercel"):
                     st.success(f"Live at: {existing['deployed_url_vercel']}")
-                if st.button("🚀 Deploy to Vercel now", key="vercel-deploy"):
+                if st.button("🚀 Deploy to Vercel now", key="vercel-deploy", disabled=is_viewer):
                     if not vtoken.strip():
                         st.warning("Paste your Vercel token first.", icon="⚠️")
                     else:
@@ -2137,7 +2227,7 @@ def main() -> None:
     # access control: if an allow-list exists, only listed emails may enter
     allowed = load_allowed()
     email = (getattr(st.user, "email", "") or "").lower()
-    if allowed and email not in [a.lower() for a in allowed]:
+    if allowed and email not in allowed_emails():
         inject_css()
         st.error("🔒 Access restricted. Your Google account is not on the allow-list "
                  "for this Jarvis instance.")
@@ -2145,6 +2235,7 @@ def main() -> None:
         if st.button("Log out", key="denied-logout"):
             st.logout()
         return
+    st.session_state["role"] = user_role(email)
 
     inject_css()
     render_sidebar()
