@@ -462,6 +462,25 @@ def set_app_netlify_site(app_id: str, site_id: str, url: str) -> None:
     _write_json(path, apps)
 
 
+def set_app_vercel(app_id: str, name: str, url: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    for a in apps:
+        if a["id"] == app_id:
+            a["vercel_name"] = name
+            a["deployed_url_vercel"] = url
+    _write_json(path, apps)
+
+
+def set_version_note(app_id: str, version_index: int, note: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    for a in apps:
+        if a["id"] == app_id and 0 <= version_index < len(a.get("versions", [])):
+            a["versions"][version_index]["note"] = note
+    _write_json(path, apps)
+
+
 # ---- research history ----
 def load_research() -> List[dict]:
     return _read_json(os.path.join(_user_dir("research"), "reports.json"), [])
@@ -1327,6 +1346,48 @@ def build_html_diff(a: str, b: str, a_name: str, b_name: str) -> str:
         a.splitlines(), b.splitlines(), a_name, b_name, context=True, numlines=2)
 
 
+def deploy_to_vercel(token: str, html: str, idea: str,
+                     project_name: str = "") -> tuple[bool, str, str]:
+    """Deploy the single-file app to Vercel. Returns (ok, url_or_error, project_name)."""
+    import re
+    name = project_name or ("jarvis-" + re.sub(r"[^a-z0-9-]", "-", idea.lower())[:24].strip("-")
+                            or "jarvis-app")
+    try:
+        r = requests.post(
+            "https://api.vercel.com/v13/deployments",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "name": name,
+                "files": [{"file": "index.html", "data": html}],
+                "projectSettings": {"framework": None},
+                "target": "production",
+            },
+            timeout=90,
+        )
+        if r.status_code not in (200, 201):
+            return False, f"Deploy failed {r.status_code}: {r.text[:220]}", name
+        info = r.json()
+        alias = (info.get("alias") or [None])[0]
+        url = "https://" + (alias or info.get("url", ""))
+        return True, url, name
+    except requests.exceptions.RequestException as exc:
+        return False, str(exc), name
+
+
+def add_netlify_domain(token: str, site_id: str, domain: str) -> tuple[bool, str]:
+    """Attach a custom domain to an existing Netlify site."""
+    try:
+        r = requests.patch(
+            f"https://api.netlify.com/api/v1/sites/{site_id}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"custom_domain": domain}, timeout=30)
+        if r.status_code not in (200, 201):
+            return False, f"Failed {r.status_code}: {r.text[:200]}"
+        return True, r.json().get("custom_domain", domain)
+    except requests.exceptions.RequestException as exc:
+        return False, str(exc)
+
+
 
 def workspace_project() -> None:
     st.subheader("🚀 Project Agent — Live App Builder")
@@ -1428,32 +1489,81 @@ def workspace_project() -> None:
         # ---- deploy helper ----
         with st.expander("🚀 Deploy this app (Netlify / Vercel)"):
             st.caption("Your app is a self-contained static file — deploy it free in seconds.")
-
-            # one-click live deploy via Netlify token
-            st.markdown("**⚡ One-click live deploy (Netlify)**")
-            token = st.text_input("Netlify personal access token", type="password",
-                                  key="netlify-token",
-                                  help="Create one at app.netlify.com → User settings → "
-                                       "Applications → Personal access tokens.")
             active_id = st.session_state.get("active_app_id", "")
             existing = next((a for a in load_apps() if a["id"] == active_id), {})
-            if existing.get("deployed_url"):
-                st.success(f"Live at: {existing['deployed_url']}")
-            if st.button("🚀 Deploy to Netlify now", key="netlify-deploy"):
-                if not token.strip():
-                    st.warning("Paste your Netlify token first.", icon="⚠️")
-                else:
-                    with st.spinner("Deploying to Netlify…"):
-                        ok, res, site_id = deploy_to_netlify(
-                            token.strip(), st.session_state["live_app_html"], idea,
-                            existing.get("netlify_site_id", ""))
-                    if ok:
-                        if active_id:
-                            set_app_netlify_site(active_id, site_id, res)
-                        st.success(f"🎉 Deployed! Your app is live at: {res}")
-                        st.markdown(f"[Open your live app →]({res})")
+
+            dtabs = st.tabs(["🟢 Netlify", "▲ Vercel"])
+
+            # --- Netlify ---
+            with dtabs[0]:
+                token = st.text_input("Netlify personal access token", type="password",
+                                      key="netlify-token",
+                                      help="app.netlify.com → User settings → Applications → "
+                                           "Personal access tokens.")
+                if existing.get("deployed_url"):
+                    st.success(f"Live at: {existing['deployed_url']}")
+                if st.button("🚀 Deploy to Netlify now", key="netlify-deploy"):
+                    if not token.strip():
+                        st.warning("Paste your Netlify token first.", icon="⚠️")
                     else:
-                        st.error(f"Deploy failed: {res}")
+                        with st.spinner("Deploying to Netlify…"):
+                            ok, res, site_id = deploy_to_netlify(
+                                token.strip(), st.session_state["live_app_html"], idea,
+                                existing.get("netlify_site_id", ""))
+                        if ok:
+                            if active_id:
+                                set_app_netlify_site(active_id, site_id, res)
+                            st.success(f"🎉 Live at: {res}")
+                            st.markdown(f"[Open your live app →]({res})")
+                            st.rerun()
+                        else:
+                            st.error(f"Deploy failed: {res}")
+
+                # custom domain (needs an existing Netlify site)
+                st.markdown("**🌐 Custom domain (subdomain of apnabihar.online)**")
+                sub = st.text_input("Subdomain", key="netlify-subdomain",
+                                    placeholder="e.g. todo → todo.apnabihar.online")
+                if st.button("Point domain to this app", key="netlify-domain-btn"):
+                    if not (token.strip() and existing.get("netlify_site_id")):
+                        st.warning("Deploy to Netlify first, and paste your token.", icon="⚠️")
+                    elif not sub.strip():
+                        st.warning("Enter a subdomain.", icon="⚠️")
+                    else:
+                        domain = f"{sub.strip().rstrip('.')}.apnabihar.online"
+                        ok, res = add_netlify_domain(token.strip(),
+                                                     existing["netlify_site_id"], domain)
+                        if ok:
+                            st.success(f"Domain attached: {domain}")
+                            st.info(f"Final step — add this DNS record at your domain host:\n\n"
+                                    f"`CNAME  {sub.strip()}  →  {existing['netlify_site_id']}"
+                                    ".netlify.app`\n\n(or point it to your Netlify site's URL). "
+                                    "SSL provisions automatically once DNS resolves.", icon="🧭")
+                        else:
+                            st.error(res)
+
+            # --- Vercel ---
+            with dtabs[1]:
+                vtoken = st.text_input("Vercel access token", type="password",
+                                       key="vercel-token",
+                                       help="vercel.com → Settings → Tokens.")
+                if existing.get("deployed_url_vercel"):
+                    st.success(f"Live at: {existing['deployed_url_vercel']}")
+                if st.button("🚀 Deploy to Vercel now", key="vercel-deploy"):
+                    if not vtoken.strip():
+                        st.warning("Paste your Vercel token first.", icon="⚠️")
+                    else:
+                        with st.spinner("Deploying to Vercel…"):
+                            ok, res, pname = deploy_to_vercel(
+                                vtoken.strip(), st.session_state["live_app_html"], idea,
+                                existing.get("vercel_name", ""))
+                        if ok:
+                            if active_id:
+                                set_app_vercel(active_id, pname, res)
+                            st.success(f"🎉 Live at: {res}")
+                            st.markdown(f"[Open your live app →]({res})")
+                            st.rerun()
+                        else:
+                            st.error(f"Deploy failed: {res}")
 
             st.divider()
             cfgs = deploy_configs(idea)
@@ -1481,13 +1591,21 @@ def workspace_project() -> None:
                 for vi, v in enumerate(versions):
                     tag = "🟢 latest" if vi == 0 else f"v{len(versions)-vi}"
                     vc1, vc2 = st.columns([3, 1])
-                    vc1.markdown(f"**{tag}** · {v['time'][:16].replace('T',' ')} UTC  \n"
-                                 f"_{v.get('note','')}_")
+                    vc1.markdown(f"**{tag}** · {v['time'][:16].replace('T',' ')} UTC")
                     if vi != 0 and vc2.button("↩️ Restore", key=f"ver-restore-{active['id']}-{vi}",
                                               use_container_width=True):
                         st.session_state["live_app_html"] = v["html"]
                         save_app(active["idea"], v.get("spec", active.get("spec", "")),
                                  v["html"], active["id"], note=f"restored {tag}")
+                        st.rerun()
+                    nc1, nc2 = st.columns([3, 1])
+                    vn = nc1.text_input("Version note", value=v.get("note", ""),
+                                        key=f"ver-note-{active['id']}-{vi}",
+                                        label_visibility="collapsed",
+                                        placeholder="Name this version, e.g. added charts")
+                    if nc2.button("💾 Save", key=f"ver-note-save-{active['id']}-{vi}",
+                                  use_container_width=True):
+                        set_version_note(active["id"], vi, vn.strip())
                         st.rerun()
                 st.markdown("**🔍 Compare two versions**")
                 labels = [f"{'latest' if i==0 else 'v'+str(len(versions)-i)} · {v['time'][11:16]}"
@@ -1549,7 +1667,12 @@ def workspace_project() -> None:
         for a in apps:
             with st.container(border=True):
                 display = a.get("name") or a["idea"]
-                deployed = f"  ·  🌐 [live]({a['deployed_url']})" if a.get("deployed_url") else ""
+                links = []
+                if a.get("deployed_url"):
+                    links.append(f"🟢 [Netlify]({a['deployed_url']})")
+                if a.get("deployed_url_vercel"):
+                    links.append(f"▲ [Vercel]({a['deployed_url_vercel']})")
+                deployed = ("  ·  " + "  ".join(links)) if links else ""
                 ac1, ac2, ac3 = st.columns([3, 1, 1])
                 ac1.markdown(f"**{display[:70]}**  \n_{a['time'][:16].replace('T',' ')} UTC_"
                              f"{deployed}")
