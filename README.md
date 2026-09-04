@@ -12,11 +12,12 @@ project scaffolding. Designed to run on your custom domain **https://apnabihar.o
 
 | Workspace | What it does |
 |-----------|--------------|
-| 💬 **AI Chat & Rewriter** | Streaming chat + 1-click "Make Professional / Summarize / Change Tone" |
-| ✉️ **Email Generator** | Recipient + goal + tone → formatted draft with copy block |
-| 🔎 **Smart Web Research** | Live DuckDuckGo search → absolute-truth summary with sources |
-| 🖼️ **Image Generator** | Free & unlimited images via Pollinations AI + download |
-| 🚀 **Project Agent** | 2-step Planner → Coder flow that writes downloadable files |
+| 💬 **AI Chat & Rewriter** | Streaming chat + saved history + voice input & read-aloud + 1-click rewrite presets |
+| ✉️ **Email Generator** | Recipient + goal + tone → formatted draft, with saveable ⭐ templates |
+| 🔎 **Smart Web Research** | Live DuckDuckGo search → cited summary, PDF export + searchable history |
+| 🖼️ **Image Generator** | Free & unlimited Pollinations images + persistent gallery |
+| 🚀 **Project Agent** | Planner → Coder that generates a runnable folder (README + setup) as a ZIP |
+| 🛠️ **Self-Upgrade Center** | Jarvis researches the web to propose fixes/upgrades you approve or deny |
 
 - 🔐 **Google login wall** — nobody reaches the app without signing in.
 - 🧠 Free **Llama-3.3-70B** brain via **Groq** or **SambaNova** (pick in sidebar).

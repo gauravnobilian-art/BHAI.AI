@@ -412,6 +412,37 @@ def load_gallery() -> List[dict]:
     return items
 
 
+# ---- research history ----
+def load_research() -> List[dict]:
+    return _read_json(os.path.join(_user_dir("research"), "reports.json"), [])
+
+
+def add_research(query: str, summary: str, sources: List[dict]) -> None:
+    path = os.path.join(_user_dir("research"), "reports.json")
+    reports = _read_json(path, [])
+    reports.insert(0, {
+        "id": str(int(time.time() * 1000)),
+        "query": query, "summary": summary,
+        "sources": [{"title": s.get("title", ""), "href": s.get("href", "")} for s in sources],
+        "time": datetime.now(timezone.utc).isoformat(),
+    })
+    _write_json(path, reports[:40])
+
+
+def delete_research(rid: str) -> None:
+    path = os.path.join(_user_dir("research"), "reports.json")
+    _write_json(path, [r for r in _read_json(path, []) if r["id"] != rid])
+
+
+# ---- self-upgrade log ----
+def load_upgrade_log() -> List[dict]:
+    return _read_json(os.path.join(_user_dir("upgrades"), "log.json"), [])
+
+
+def save_upgrade_log(log: List[dict]) -> None:
+    _write_json(os.path.join(_user_dir("upgrades"), "log.json"), log[:80])
+
+
 # ----------------------------------------------------------------------------- #
 #  Text-to-speech  (free, in-browser SpeechSynthesis)
 # ----------------------------------------------------------------------------- #
@@ -781,6 +812,7 @@ def workspace_research() -> None:
         st.session_state["research_summary"] = summary
         st.session_state["research_sources"] = results
         st.session_state["research_query"] = query
+        add_research(query, summary, results)
 
     if st.session_state.get("research_summary"):
         pdf_bytes = build_pdf(
@@ -794,6 +826,25 @@ def workspace_research() -> None:
         with st.expander("🔗 Sources"):
             for i, r in enumerate(st.session_state.get("research_sources", [])):
                 st.markdown(f"**[{i+1}] {r.get('title','')}**  \n{r.get('href','')}")
+
+    # ---- research history ----
+    reports = load_research()
+    if reports:
+        st.divider()
+        st.markdown(f"#### 🗂️ Research History ({len(reports)})")
+        for rep in reports:
+            with st.expander(f"🔎 {rep['query']}  ·  {rep['time'][:10]}"):
+                st.markdown(rep["summary"])
+                cols = st.columns([1, 1])
+                cols[0].download_button(
+                    "📄 Re-download PDF",
+                    data=build_pdf(f"Research: {rep['query']}", rep["summary"], rep["sources"]),
+                    file_name="jarvis-research.pdf", mime="application/pdf",
+                    key=f"rehist-pdf-{rep['id']}", use_container_width=True)
+                if cols[1].button("🗑️ Delete", key=f"rehist-del-{rep['id']}",
+                                  use_container_width=True):
+                    delete_research(rep["id"])
+                    st.rerun()
 
 
 # ----------------------------------------------------------------------------- #
@@ -946,6 +997,151 @@ def workspace_project() -> None:
 
 
 # ----------------------------------------------------------------------------- #
+#  Workspace 6 — Self-Upgrade Center (self-heal / bug-fix / evolve)
+# ----------------------------------------------------------------------------- #
+
+JARVIS_CAPABILITIES = (
+    "Jarvis Personal OS — a Streamlit app with: Google OAuth login; AI Chat & Rewriter "
+    "(Groq/SambaNova Llama-3.3-70B) with voice input and read-aloud; Email Generator with "
+    "saved templates; Smart Web Research (DuckDuckGo) with PDF export and history; Image "
+    "Generator (Pollinations) with a saved gallery; and a Project Agent (Planner->Coder)."
+)
+
+
+def _extract_json(raw: str):
+    import re
+    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    if not match:
+        return []
+    try:
+        return json.loads(match.group(0))
+    except ValueError:
+        return []
+
+
+def workspace_upgrade() -> None:
+    st.subheader("🛠️ Self-Upgrade Center")
+    st.caption("Jarvis researches the live web to propose fixes & upgrades. "
+               "Nothing changes without YOUR approval.")
+
+    st.info("Jarvis gathers ideas from free public sources, then reasons about how to improve "
+            "itself. Each proposal is a suggestion you can **Approve** or **Deny** — approved "
+            "items are logged with ready-to-apply code. Jarvis never edits its own code "
+            "automatically.", icon="🧬")
+
+    mode = st.radio("Mode", ["🔍 Scan for upgrades", "🩺 Self-heal (fix an error)"],
+                    horizontal=True, key="upg-mode")
+
+    if mode == "🔍 Scan for upgrades":
+        focus = st.text_input("Focus area (optional)", key="upg-focus",
+                              placeholder="e.g. faster image generation, better research accuracy")
+        if st.button("🔍 Scan the web & propose upgrades", key="upg-scan"):
+            with st.spinner("Gathering intel from the web…"):
+                queries = [
+                    "latest Streamlit features 2026",
+                    "best free python AI libraries 2026",
+                    f"improve {focus}" if focus.strip() else "AI assistant app improvement ideas",
+                ]
+                findings = []
+                for q in queries:
+                    try:
+                        findings += web_search(q, max_results=3)
+                    except Exception:  # noqa: BLE001
+                        continue
+            snippets = "\n".join(f"- {r.get('title','')}: {r.get('body','')[:200]}"
+                                 for r in findings) or "No web data available."
+            with st.spinner("Reasoning about self-improvements…"):
+                raw = llm_chat([
+                    {"role": "system",
+                     "content": "You are Jarvis's self-improvement engine. Given the app's current "
+                                "capabilities and fresh web findings, propose 3-4 concrete upgrades. "
+                                "Return ONLY a JSON array. Each item: "
+                                '{"title": str, "type": "Bug Fix"|"Upgrade"|"New Capability", '
+                                '"rationale": str, "change": str, "code": str}. '
+                                "The 'code' is a short Python/Streamlit snippet to apply the idea."},
+                    {"role": "user",
+                     "content": f"App capabilities:\n{JARVIS_CAPABILITIES}\n\n"
+                                f"Focus: {focus or 'general'}\n\nWeb findings:\n{snippets}"},
+                ], temperature=0.5, max_tokens=2500)
+            st.session_state["upg_proposals"] = _extract_json(raw)
+            if not st.session_state["upg_proposals"]:
+                st.warning("Couldn't parse proposals. Try again or add an LLM key.")
+
+    else:  # Self-heal
+        err = st.text_area("Paste an error message / traceback", key="upg-err", height=140,
+                           placeholder="Paste the Python traceback or bug description here…")
+        if st.button("🩺 Diagnose & propose a fix", key="upg-heal"):
+            if not err.strip():
+                st.warning("Paste the error first.", icon="⚠️")
+            else:
+                with st.spinner("Diagnosing…"):
+                    raw = llm_chat([
+                        {"role": "system",
+                         "content": "You are Jarvis's self-healing engine. Diagnose the error and "
+                                    "return ONLY a JSON array with ONE item: "
+                                    '{"title": str, "type": "Bug Fix", "rationale": str, '
+                                    '"change": str, "code": str} where code is the corrected snippet.'},
+                        {"role": "user",
+                         "content": f"App:\n{JARVIS_CAPABILITIES}\n\nError:\n{err}"},
+                    ], temperature=0.2, max_tokens=1800)
+                st.session_state["upg_proposals"] = _extract_json(raw)
+
+    # ---- render proposals with approve/deny ----
+    proposals = st.session_state.get("upg_proposals", [])
+    if proposals:
+        st.markdown("#### 📋 Proposals awaiting your decision")
+        badge = {"Bug Fix": "🐞", "Upgrade": "⬆️", "New Capability": "✨"}
+        for idx, p in enumerate(list(proposals)):
+            with st.container(border=True):
+                st.markdown(f"**{badge.get(p.get('type'),'🔧')} {p.get('title','Untitled')}** "
+                            f"· _{p.get('type','')}_")
+                st.markdown(f"**Why:** {p.get('rationale','')}")
+                st.markdown(f"**Change:** {p.get('change','')}")
+                if p.get("code"):
+                    st.code(p["code"], language="python")
+                c1, c2 = st.columns(2)
+                if c1.button("✅ Approve", key=f"upg-appr-{idx}", use_container_width=True):
+                    log = load_upgrade_log()
+                    log.insert(0, {**p, "status": "approved",
+                                   "time": datetime.now(timezone.utc).isoformat()})
+                    save_upgrade_log(log)
+                    st.session_state["upg_proposals"].pop(idx)
+                    st.toast(f"Approved: {p.get('title','')}", icon="✅")
+                    st.rerun()
+                if c2.button("❌ Deny", key=f"upg-deny-{idx}", use_container_width=True):
+                    log = load_upgrade_log()
+                    log.insert(0, {**p, "status": "denied",
+                                   "time": datetime.now(timezone.utc).isoformat()})
+                    save_upgrade_log(log)
+                    st.session_state["upg_proposals"].pop(idx)
+                    st.toast(f"Denied: {p.get('title','')}", icon="❌")
+                    st.rerun()
+
+    # ---- changelog ----
+    log = load_upgrade_log()
+    if log:
+        st.divider()
+        approved = [x for x in log if x["status"] == "approved"]
+        st.markdown(f"#### 🧬 Evolution Log  ·  {len(approved)} approved / {len(log)} total")
+        if approved:
+            patch = "\n\n".join(
+                f"# === {x['title']} ({x['type']}) — {x['time'][:10]} ===\n{x.get('code','')}"
+                for x in approved)
+            st.download_button("⬇️ Download approved upgrades patch", data=patch,
+                               file_name="jarvis_upgrades.py", mime="text/x-python",
+                               key="upg-patch")
+        for x in log:
+            icon = "✅" if x["status"] == "approved" else "❌"
+            with st.expander(f"{icon} {x.get('title','')}  ·  {x['time'][:10]}"):
+                st.markdown(f"**Type:** {x.get('type','')}  \n**Why:** {x.get('rationale','')}")
+                if x.get("code"):
+                    st.code(x["code"], language="python")
+        if st.button("🗑️ Clear evolution log", key="upg-clear"):
+            save_upgrade_log([])
+            st.rerun()
+
+
+# ----------------------------------------------------------------------------- #
 #  Main
 # ----------------------------------------------------------------------------- #
 
@@ -962,7 +1158,8 @@ def main() -> None:
                 "Pick a workspace below.</p>", unsafe_allow_html=True)
 
     tabs = st.tabs([
-        "💬 AI Chat", "✉️ Email", "🔎 Research", "🖼️ Images", "🚀 Project Agent",
+        "💬 AI Chat", "✉️ Email", "🔎 Research", "🖼️ Images",
+        "🚀 Project Agent", "🛠️ Self-Upgrade",
     ])
     with tabs[0]:
         workspace_chat()
@@ -974,6 +1171,8 @@ def main() -> None:
         workspace_image()
     with tabs[4]:
         workspace_project()
+    with tabs[5]:
+        workspace_upgrade()
 
 
 if __name__ == "__main__":
