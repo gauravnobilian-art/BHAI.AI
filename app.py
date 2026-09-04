@@ -412,20 +412,24 @@ def load_gallery() -> List[dict]:
     return items
 
 
-# ---- built-app gallery (live App Builder) ----
-def save_app(idea: str, spec: str, html: str, app_id: str = "") -> str:
+# ---- built-app gallery (live App Builder) with versions ----
+def save_app(idea: str, spec: str, html: str, app_id: str = "", note: str = "") -> str:
     path = os.path.join(_user_dir("apps"), "apps.json")
     apps = _read_json(path, [])
+    now = datetime.now(timezone.utc).isoformat()
+    version = {"html": html, "spec": spec, "time": now, "note": note or "initial build"}
     if app_id:
         for a in apps:
             if a["id"] == app_id:
-                a.update({"idea": idea, "spec": spec, "html": html,
-                          "time": datetime.now(timezone.utc).isoformat()})
+                a.setdefault("versions", [])
+                a["versions"].insert(0, version)
+                a["versions"] = a["versions"][:20]
+                a.update({"idea": idea, "spec": spec, "html": html, "time": now})
                 _write_json(path, apps)
                 return app_id
     app_id = str(int(time.time() * 1000))
-    apps.insert(0, {"id": app_id, "idea": idea, "spec": spec, "html": html,
-                    "time": datetime.now(timezone.utc).isoformat()})
+    apps.insert(0, {"id": app_id, "name": "", "idea": idea, "spec": spec, "html": html,
+                    "time": now, "versions": [version]})
     _write_json(path, apps[:30])
     return app_id
 
@@ -437,6 +441,25 @@ def load_apps() -> List[dict]:
 def delete_app(app_id: str) -> None:
     path = os.path.join(_user_dir("apps"), "apps.json")
     _write_json(path, [a for a in _read_json(path, []) if a["id"] != app_id])
+
+
+def rename_app(app_id: str, name: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    for a in apps:
+        if a["id"] == app_id:
+            a["name"] = name
+    _write_json(path, apps)
+
+
+def set_app_netlify_site(app_id: str, site_id: str, url: str) -> None:
+    path = os.path.join(_user_dir("apps"), "apps.json")
+    apps = _read_json(path, [])
+    for a in apps:
+        if a["id"] == app_id:
+            a["netlify_site_id"] = site_id
+            a["deployed_url"] = url
+    _write_json(path, apps)
 
 
 # ---- research history ----
@@ -1218,9 +1241,12 @@ def generate_live_app(idea: str, refine: str = "", current_html: str = "") -> st
     return _extract_html(raw)
 
 
-def _render_live_preview(html: str, height: int = 520) -> None:
+def _render_live_preview(html: str, height: int = 520, width=None) -> None:
     import streamlit.components.v1 as components
-    components.html(html, height=height, scrolling=True)
+    if width:
+        components.html(html, height=height, width=width, scrolling=True)
+    else:
+        components.html(html, height=height, scrolling=True)
 
 
 def _fullscreen_button(html: str) -> None:
@@ -1264,6 +1290,42 @@ def deploy_configs(idea: str) -> dict:
             "Both host the app for free on a public URL.\n"
         ),
     }
+
+
+def deploy_to_netlify(token: str, html: str, idea: str,
+                      site_id: str = "") -> tuple[bool, str, str]:
+    """Deploy the single-file app to Netlify. Returns (ok, url_or_error, site_id)."""
+    import zipfile as _zip
+    api = "https://api.netlify.com/api/v1"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        if not site_id:
+            r = requests.post(f"{api}/sites", headers=headers, json={}, timeout=30)
+            if r.status_code not in (200, 201):
+                return False, f"Site create failed {r.status_code}: {r.text[:200]}", ""
+            site_id = r.json()["id"]
+        buf = io.BytesIO()
+        with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as zf:
+            zf.writestr("index.html", html)
+            for fname, content in deploy_configs(idea).items():
+                zf.writestr(fname, content)
+        d = requests.post(f"{api}/sites/{site_id}/deploys",
+                          headers={**headers, "Content-Type": "application/zip"},
+                          data=buf.getvalue(), timeout=90)
+        if d.status_code not in (200, 201):
+            return False, f"Deploy failed {d.status_code}: {d.text[:200]}", site_id
+        info = d.json()
+        url = info.get("ssl_url") or info.get("url") or info.get("deploy_ssl_url", "")
+        return True, url, site_id
+    except requests.exceptions.RequestException as exc:
+        return False, str(exc), site_id
+
+
+def build_html_diff(a: str, b: str, a_name: str, b_name: str) -> str:
+    import difflib
+    return difflib.HtmlDiff(wrapcolumn=70).make_table(
+        a.splitlines(), b.splitlines(), a_name, b_name, context=True, numlines=2)
+
 
 
 def workspace_project() -> None:
@@ -1325,10 +1387,14 @@ def workspace_project() -> None:
     if st.session_state.get("live_app_html"):
         st.divider()
         st.markdown("### 🔴 Live Preview — Current vs Expected")
+        devices = {"🖥️ Desktop": (None, 560), "📱 Phone": (390, 760), "📟 Tablet": (768, 700)}
+        device = st.radio("Preview device", list(devices.keys()), horizontal=True,
+                          key="preview-device", label_visibility="collapsed")
+        dw, dh = devices[device]
         left, right = st.columns([3, 2])
         with left:
             st.markdown("**🟢 Current (working app)**")
-            _render_live_preview(st.session_state["live_app_html"])
+            _render_live_preview(st.session_state["live_app_html"], height=dh, width=dw)
             lc1, lc2 = st.columns(2)
             with lc1:
                 st.download_button("⬇️ Download index.html",
@@ -1339,7 +1405,7 @@ def workspace_project() -> None:
                 _fullscreen_button(st.session_state["live_app_html"])
         with right:
             st.markdown("**🎯 Expected (spec)**")
-            with st.container(border=True, height=520):
+            with st.container(border=True, height=560):
                 st.markdown(st.session_state.get("proj_plan", "_No spec yet._"))
 
         # ---- live iteration ----
@@ -1355,12 +1421,41 @@ def workspace_project() -> None:
                     status.update(label="✅ Updated — preview refreshed", state="complete")
                 st.session_state["active_app_id"] = save_app(
                     idea, st.session_state.get("proj_plan", ""),
-                    st.session_state["live_app_html"], st.session_state.get("active_app_id", ""))
+                    st.session_state["live_app_html"], st.session_state.get("active_app_id", ""),
+                    note=refine.strip())
                 st.rerun()
 
         # ---- deploy helper ----
         with st.expander("🚀 Deploy this app (Netlify / Vercel)"):
             st.caption("Your app is a self-contained static file — deploy it free in seconds.")
+
+            # one-click live deploy via Netlify token
+            st.markdown("**⚡ One-click live deploy (Netlify)**")
+            token = st.text_input("Netlify personal access token", type="password",
+                                  key="netlify-token",
+                                  help="Create one at app.netlify.com → User settings → "
+                                       "Applications → Personal access tokens.")
+            active_id = st.session_state.get("active_app_id", "")
+            existing = next((a for a in load_apps() if a["id"] == active_id), {})
+            if existing.get("deployed_url"):
+                st.success(f"Live at: {existing['deployed_url']}")
+            if st.button("🚀 Deploy to Netlify now", key="netlify-deploy"):
+                if not token.strip():
+                    st.warning("Paste your Netlify token first.", icon="⚠️")
+                else:
+                    with st.spinner("Deploying to Netlify…"):
+                        ok, res, site_id = deploy_to_netlify(
+                            token.strip(), st.session_state["live_app_html"], idea,
+                            existing.get("netlify_site_id", ""))
+                    if ok:
+                        if active_id:
+                            set_app_netlify_site(active_id, site_id, res)
+                        st.success(f"🎉 Deployed! Your app is live at: {res}")
+                        st.markdown(f"[Open your live app →]({res})")
+                    else:
+                        st.error(f"Deploy failed: {res}")
+
+            st.divider()
             cfgs = deploy_configs(idea)
             dbuf = io.BytesIO()
             with zipfile.ZipFile(dbuf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1370,12 +1465,49 @@ def workspace_project() -> None:
             st.download_button("⬇️ Download deploy bundle (.zip)", data=dbuf.getvalue(),
                                file_name="jarvis-deploy.zip", mime="application/zip",
                                key="deploy-zip")
-            st.markdown("**Netlify:** drag the unzipped folder onto "
-                        "[app.netlify.com/drop](https://app.netlify.com/drop) — instant live URL.")
-            st.markdown("**Vercel:** run `vercel --prod` inside the unzipped folder.")
+            st.markdown("**Manual — Netlify:** drag the unzipped folder onto "
+                        "[app.netlify.com/drop](https://app.netlify.com/drop).")
+            st.markdown("**Manual — Vercel:** run `vercel --prod` inside the unzipped folder.")
             for fname, content in cfgs.items():
                 with st.popover(f"📄 {fname}"):
                     st.code(content, language="json" if fname.endswith(".json") else "text")
+
+        # ---- version history ----
+        active = next((a for a in load_apps()
+                       if a["id"] == st.session_state.get("active_app_id")), None)
+        if active and len(active.get("versions", [])) > 1:
+            versions = active["versions"]
+            with st.expander(f"🕓 Version history ({len(versions)})"):
+                for vi, v in enumerate(versions):
+                    tag = "🟢 latest" if vi == 0 else f"v{len(versions)-vi}"
+                    vc1, vc2 = st.columns([3, 1])
+                    vc1.markdown(f"**{tag}** · {v['time'][:16].replace('T',' ')} UTC  \n"
+                                 f"_{v.get('note','')}_")
+                    if vi != 0 and vc2.button("↩️ Restore", key=f"ver-restore-{active['id']}-{vi}",
+                                              use_container_width=True):
+                        st.session_state["live_app_html"] = v["html"]
+                        save_app(active["idea"], v.get("spec", active.get("spec", "")),
+                                 v["html"], active["id"], note=f"restored {tag}")
+                        st.rerun()
+                st.markdown("**🔍 Compare two versions**")
+                labels = [f"{'latest' if i==0 else 'v'+str(len(versions)-i)} · {v['time'][11:16]}"
+                          for i, v in enumerate(versions)]
+                cc1, cc2 = st.columns(2)
+                ia = cc1.selectbox("Base", range(len(versions)),
+                                   format_func=lambda i: labels[i], key="ver-a", index=min(1, len(versions)-1))
+                ib = cc2.selectbox("Compare", range(len(versions)),
+                                   format_func=lambda i: labels[i], key="ver-b", index=0)
+                if st.button("Show diff", key="ver-diff-btn"):
+                    import streamlit.components.v1 as components
+                    dh = build_html_diff(versions[ia]["html"], versions[ib]["html"],
+                                         labels[ia], labels[ib])
+                    components.html(
+                        "<style>table.diff{font-family:monospace;font-size:12px;width:100%}"
+                        ".diff_header{background:#1e2937;color:#7d8896}td{padding:1px 6px}"
+                        ".diff_add{background:#0f3a2f;color:#00f5d4}"
+                        ".diff_chg{background:#3a340f;color:#ffd166}"
+                        ".diff_sub{background:#3a0f1e;color:#ff6b81}</style>" + dh,
+                        height=420, scrolling=True)
 
     # ---- production files ----
     if st.session_state.get("proj_files"):
@@ -1416,8 +1548,11 @@ def workspace_project() -> None:
         st.caption("Reopen any app to keep iterating on it.")
         for a in apps:
             with st.container(border=True):
+                display = a.get("name") or a["idea"]
+                deployed = f"  ·  🌐 [live]({a['deployed_url']})" if a.get("deployed_url") else ""
                 ac1, ac2, ac3 = st.columns([3, 1, 1])
-                ac1.markdown(f"**{a['idea'][:70]}**  \n_{a['time'][:16].replace('T',' ')} UTC_")
+                ac1.markdown(f"**{display[:70]}**  \n_{a['time'][:16].replace('T',' ')} UTC_"
+                             f"{deployed}")
                 if ac2.button("📂 Open", key=f"app-open-{a['id']}", use_container_width=True):
                     st.session_state["live_app_html"] = a["html"]
                     st.session_state["proj_plan"] = a.get("spec", "")
@@ -1426,6 +1561,13 @@ def workspace_project() -> None:
                     st.rerun()
                 if ac3.button("🗑️ Delete", key=f"app-del-{a['id']}", use_container_width=True):
                     delete_app(a["id"])
+                    st.rerun()
+                rn1, rn2 = st.columns([3, 1])
+                new_name = rn1.text_input("Name", value=a.get("name", ""),
+                                          key=f"app-name-{a['id']}", label_visibility="collapsed",
+                                          placeholder="Rename this app…")
+                if rn2.button("✏️ Rename", key=f"app-rename-{a['id']}", use_container_width=True):
+                    rename_app(a["id"], new_name.strip())
                     st.rerun()
 
 
