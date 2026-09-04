@@ -20,10 +20,15 @@ export function BuilderProvider({ children }) {
   const [result, setResult] = useState(null); // {appId, plan, files, preview_html}
   const [error, setError] = useState("");
   const [apps, setApps] = useState([]);
+  const [presets, setPresets] = useState([]);
   const stopRef = useRef(false);
 
   const loadApps = useCallback(
     () => http.get("/history/apps").then(({ data }) => setApps(data.apps || [])).catch(() => {}),
+    []
+  );
+  const loadPresets = useCallback(
+    () => http.get("/crew-presets").then(({ data }) => setPresets(data.presets || [])).catch(() => {}),
     []
   );
 
@@ -37,10 +42,25 @@ export function BuilderProvider({ children }) {
       setSelected(init);
     }).catch(() => {});
     loadApps();
+    loadPresets();
     return () => { stopRef.current = true; };
-  }, [loadApps]);
+  }, [loadApps, loadPresets]);
 
   const setModel = (agentId, modelId) => setSelected((s) => ({ ...s, [agentId]: modelId }));
+
+  const savePreset = async (name) => {
+    await http.post("/crew-presets", { name: name || "My Crew", models: selected }).catch(() => {});
+    loadPresets();
+  };
+  const applyPreset = (p) => setSelected((s) => ({ ...s, ...(p.models || {}) }));
+  const deletePreset = async (id) => {
+    await http.delete(`/crew-presets/${id}`).catch(() => {});
+    loadPresets();
+  };
+  const deployApp = async (appId, token) => {
+    const { data } = await http.post(`/apps/${appId}/deploy`, { netlify_token: token });
+    return data.url;
+  };
 
   const build = async () => {
     if (!idea.trim() || building) return;
@@ -99,6 +119,7 @@ export function BuilderProvider({ children }) {
     idea, setIdea, extra, setExtra, refine, setRefine,
     building, progress, agents, theme, themeLabel, banter, result, error,
     apps, loadApps, build, applyRefine,
+    presets, savePreset, applyPreset, deletePreset, deployApp,
   };
   return <BuilderContext.Provider value={value}>{children}</BuilderContext.Provider>;
 }

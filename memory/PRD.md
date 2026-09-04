@@ -41,7 +41,18 @@ so Jarvis was rebuilt natively on React+FastAPI to be usable at the emergent.hos
 ## Test credentials
 None (no auth yet). EMERGENT_LLM_KEY in /app/backend/.env.
 
-## Update 2026-06 (c) — Live package: shareable preview, themed crew, photo→image
+## Update 2026-06 (d) — Deploy, Save Crew, Restyle presets, per-agent voices
+- **Netlify one-click deploy**: `POST /api/apps/{id}/deploy` {netlify_token} zips the demo (index.html)
+  and pushes to Netlify (`POST /api/v1/sites`, Content-Type application/zip) → returns live *.netlify.app
+  URL (stored as `netlify_url`). UI: "Publish live" panel in preview header (token saved to localStorage).
+  Deploys the interactive static demo (full FastAPI+Mongo apps can't run on Netlify).
+- **Save My Crew**: `crew_presets` collection + GET/POST/DELETE `/api/crew-presets` (name + models map).
+  Team tab UI to save/apply/delete favourite model line-ups.
+- **Photo restyle presets**: 6 one-tap chips (Madhubani, Cartoon, Festive Diwali, 3D Pixar, Watercolor,
+  Pencil Sketch) in the Photo→Image mode; sets prompt and runs the Nano Banana edit instantly.
+- **Per-agent voices**: ChatterFeed assigns each crew member a distinct voice/pitch/rate (hash of name)
+  so the Bhojpuri banter sounds like different people.
+- Verified via curl (presets CRUD, endpoints wired); user testing UI manually. No testing agent run.
 - **Project-themed crew + animation**: `_plan_crew()` (LLM) casts a Bihari crew whose role titles
   match the app domain (banking → Manager Babu, Cashier Bhaiya, Tijori Tufani…) + picks an
   animation `theme` (bank/shop/food/health/school/app) + 6 Bhojpuri banter lines. Stored on the

@@ -832,6 +832,69 @@ async def app_zip(app_id: str, user: dict = Depends(get_current_user)):
                              headers={"Content-Disposition": 'attachment; filename="bhai-app.zip"'})
 
 
+class DeployRequest(BaseModel):
+    netlify_token: str
+
+
+@api_router.post("/apps/{app_id}/deploy")
+async def deploy_app(app_id: str, body: DeployRequest, user: dict = Depends(get_current_user)):
+    doc = await db.apps.find_one({"user_id": user["user_id"], "id": app_id},
+                                 {"_id": 0, "preview_html": 1})
+    if not doc or not doc.get("preview_html"):
+        raise HTTPException(status_code=404, detail="App not found or not ready.")
+    token = (body.netlify_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="A Netlify access token is required.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("index.html", doc["preview_html"])
+    payload = buf.getvalue()
+    try:
+        r = await asyncio.to_thread(
+            requests.post, "https://api.netlify.com/api/v1/sites",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/zip"},
+            data=payload, timeout=90)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail="Could not reach Netlify. Try again.")
+    if r.status_code in (401, 403):
+        raise HTTPException(status_code=400, detail="Netlify rejected the token. Check it and retry.")
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail="Netlify deploy failed. Please try again.")
+    data = r.json()
+    url = data.get("ssl_url") or data.get("url") or data.get("admin_url")
+    await db.apps.update_one({"id": app_id}, {"$set": {"netlify_url": url}})
+    return {"url": url}
+
+
+class CrewPreset(BaseModel):
+    name: str
+    models: dict
+
+
+@api_router.get("/crew-presets")
+async def list_presets(user: dict = Depends(get_current_user)):
+    docs = await db.crew_presets.find({"user_id": user["user_id"]}, {"_id": 0}) \
+        .sort("created_at", -1).to_list(50)
+    for d in docs:
+        d["created_at"] = str(d.get("created_at", ""))
+    return {"presets": docs}
+
+
+@api_router.post("/crew-presets")
+async def add_preset(body: CrewPreset, user: dict = Depends(get_current_user)):
+    pid = str(uuid.uuid4())
+    await db.crew_presets.insert_one({
+        "id": pid, "user_id": user["user_id"], "name": (body.name or "My Crew")[:40],
+        "models": body.models or {}, "created_at": datetime.now(timezone.utc)})
+    return {"id": pid}
+
+
+@api_router.delete("/crew-presets/{pid}")
+async def del_preset(pid: str, user: dict = Depends(get_current_user)):
+    await db.crew_presets.delete_many({"user_id": user["user_id"], "id": pid})
+    return {"ok": True}
+
+
 @api_router.get("/history/apps")
 async def get_apps(user: dict = Depends(get_current_user)):
     docs = await db.apps.find({"user_id": user["user_id"]}, {"_id": 0}) \

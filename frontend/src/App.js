@@ -7,7 +7,7 @@ import AgentPanel from "./builder/AgentPanel";
 import {
   MessageSquare, Mail, Search, Image as ImageIcon, Rocket,
   Send, Download, Copy, Check, Sparkles, Wand2, Mic, Volume2, VolumeX, LogOut, Trash2,
-  LayoutDashboard, Shield, Radio, Users, Plus, Hammer, ExternalLink, Camera, Upload,
+  LayoutDashboard, Shield, Radio, Users, Plus, Hammer, ExternalLink, Camera, Upload, Globe, Save,
 } from "lucide-react";
 
 const TABS = [
@@ -294,16 +294,26 @@ function ImageTab() {
     e.target.value = "";
   };
 
-  const editPhoto = async () => {
-    if (!photo || !pPrompt.trim() || pLoading) return;
+  const editPhoto = async (override) => {
+    const usePrompt = (override ?? pPrompt).trim();
+    if (!photo || !usePrompt || pLoading) return;
     setPLoading(true); setPErr(""); setPResult("");
     try {
-      const { data } = await http.post("/image/edit", { image_base64: photo, prompt: pPrompt.trim() });
+      const { data } = await http.post("/image/edit", { image_base64: photo, prompt: usePrompt });
       setPResult(data.image);
     } catch (e) {
       setPErr("⚠️ " + (e.response?.data?.detail || "Image edit failed. Try again."));
     } finally { setPLoading(false); }
   };
+
+  const RESTYLE_PRESETS = [
+    { label: "Madhubani", prompt: "Restyle this photo as a traditional Madhubani / Mithila folk painting with bold outlines and vibrant natural colors." },
+    { label: "Cartoon", prompt: "Turn this photo into a fun, clean cartoon illustration with bold outlines." },
+    { label: "Festive Diwali", prompt: "Add a warm festive Diwali background with glowing diyas and marigold garlands." },
+    { label: "3D Pixar", prompt: "Restyle as a cute 3D Pixar-style animated character render." },
+    { label: "Watercolor", prompt: "Repaint this photo as a soft, artistic watercolor painting." },
+    { label: "Pencil Sketch", prompt: "Convert this photo into a detailed black-and-white pencil sketch." },
+  ];
 
   return (
     <div data-testid="image-tab">
@@ -345,8 +355,17 @@ function ImageTab() {
           </div>
 
           <textarea data-testid="image-edit-prompt" className="jv-textarea" style={{ minHeight: 80, marginTop: ".8rem" }} placeholder="e.g. make it a Madhubani painting, add a festive background, turn into a cartoon…" value={pPrompt} onChange={(e) => setPPrompt(e.target.value)} />
+          <div style={{ display: "flex", gap: ".4rem", flexWrap: "wrap", marginTop: ".6rem" }} data-testid="restyle-presets">
+            {RESTYLE_PRESETS.map((p) => (
+              <button key={p.label} className="jv-preset" data-testid={`restyle-${p.label.toLowerCase().split(" ")[0]}`}
+                disabled={!photo || pLoading}
+                onClick={() => { setPPrompt(p.prompt); editPhoto(p.prompt); }}>
+                <Wand2 size={12} style={{ marginRight: 4 }} />{p.label}
+              </button>
+            ))}
+          </div>
           <div style={{ marginTop: ".8rem" }}>
-            <button data-testid="image-edit-generate" className="jv-btn" onClick={editPhoto} disabled={pLoading || !photo || !pPrompt.trim()}>{pLoading ? <Spinner /> : <Wand2 size={16} />} {pLoading ? "Ban raha hai…" : "Generate from photo"}</button>
+            <button data-testid="image-edit-generate" className="jv-btn" onClick={() => editPhoto()} disabled={pLoading || !photo || !pPrompt.trim()}>{pLoading ? <Spinner /> : <Wand2 size={16} />} {pLoading ? "Ban raha hai…" : "Generate from photo"}</button>
           </div>
           {pErr && <div style={{ color: "var(--red-2)", marginTop: ".8rem" }} data-testid="image-edit-error">{pErr}</div>}
           {pResult && (
@@ -382,10 +401,18 @@ function ChatterFeed({ banter, progress, building, voice }) {
     if (last > spokenRef.current) {
       spokenRef.current = last;
       try {
-        const u = new SpeechSynthesisUtterance(shown[last].text);
-        u.lang = "hi-IN"; u.rate = 1.02;
-        const hi = window.speechSynthesis.getVoices().find((v) => v.lang && v.lang.startsWith("hi"));
-        if (hi) u.voice = hi;
+        const line = shown[last];
+        const u = new SpeechSynthesisUtterance(line.text);
+        u.lang = "hi-IN";
+        // give each crew member their own voice character
+        const voices = window.speechSynthesis.getVoices();
+        const pool = voices.filter((v) => v.lang && (v.lang.startsWith("hi") || v.lang.includes("IN")));
+        const list = pool.length ? pool : voices;
+        let h = 0; const from = line.from || "B";
+        for (let i = 0; i < from.length; i++) h = (h * 31 + from.charCodeAt(i)) % 997;
+        if (list.length) u.voice = list[h % list.length];
+        u.pitch = 0.8 + (h % 5) * 0.12;   // 0.80 – 1.28
+        u.rate = 0.92 + (h % 3) * 0.08;   // 0.92 – 1.08
         window.speechSynthesis.speak(u);
       } catch { /* noop */ }
     }
@@ -413,14 +440,31 @@ function ChatterFeed({ banter, progress, building, voice }) {
 function BuildTab() {
   const {
     idea, setIdea, extra, setExtra, refine, setRefine, building, progress,
-    theme, themeLabel, banter, result, error, apps, build, applyRefine,
+    theme, themeLabel, banter, result, error, apps, build, applyRefine, deployApp,
   } = useBuilder();
   const [openFile, setOpenFile] = useState(null);
   const [voice, setVoice] = useState(false);
+  const [deployOpen, setDeployOpen] = useState(false);
+  const [nToken, setNToken] = useState(() => localStorage.getItem("netlify_token") || "");
+  const [deploying, setDeploying] = useState(false);
+  const [deployUrl, setDeployUrl] = useState("");
+  const [deployErr, setDeployErr] = useState("");
   const active = building || progress > 0 || result;
 
   const zipUrl = result?.appId ? `${API}/apps/${result.appId}/zip` : "";
   const previewUrl = result?.appId ? `${API}/apps/${result.appId}/preview` : "";
+
+  const doDeploy = async () => {
+    if (!nToken.trim() || deploying) return;
+    setDeploying(true); setDeployErr(""); setDeployUrl("");
+    try {
+      localStorage.setItem("netlify_token", nToken.trim());
+      const url = await deployApp(result.appId, nToken.trim());
+      setDeployUrl(url);
+    } catch (e) {
+      setDeployErr("⚠️ " + (e.response?.data?.detail || "Deploy failed. Check your token and retry."));
+    } finally { setDeploying(false); }
+  };
 
   return (
     <div data-testid="build-tab">
@@ -487,9 +531,28 @@ function BuildTab() {
               <strong>Live Preview</strong>
               <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
                 <a data-testid="open-preview-newtab" className="jv-btn jv-btn-ghost" href={previewUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Open in new tab</a>
+                <button data-testid="deploy-open-btn" className="jv-btn jv-btn-ghost" onClick={() => setDeployOpen(!deployOpen)}><Globe size={15} /> Publish live</button>
                 <a data-testid="download-project-zip-button" className="jv-btn" href={zipUrl}><Download size={16} /> Download project (.zip)</a>
               </div>
             </div>
+            {deployOpen && (
+              <div style={{ padding: ".9rem 1rem", borderBottom: "1px solid var(--border)", background: "#1C1512" }} data-testid="deploy-panel">
+                <div className="jv-muted" style={{ fontSize: ".82rem", marginBottom: ".5rem" }}>
+                  Publish the interactive demo live for free on Netlify. Paste a Netlify access token
+                  (<a href="https://app.netlify.com/user/applications#personal-access-tokens" target="_blank" rel="noreferrer" style={{ color: "var(--gold)" }}>get one here</a>) — you'll get a public *.netlify.app link.
+                </div>
+                <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+                  <input data-testid="netlify-token-input" className="jv-input" type="password" placeholder="Netlify access token" value={nToken} onChange={(e) => setNToken(e.target.value)} style={{ flex: "1 1 240px" }} />
+                  <button data-testid="deploy-run-btn" className="jv-btn" onClick={doDeploy} disabled={deploying || !nToken.trim()}>{deploying ? <Spinner /> : <Globe size={16} />} {deploying ? "Publishing…" : "Publish"}</button>
+                </div>
+                {deployErr && <div style={{ color: "var(--red-2)", marginTop: ".5rem" }} data-testid="deploy-error">{deployErr}</div>}
+                {deployUrl && (
+                  <div style={{ marginTop: ".6rem" }} data-testid="deploy-result">
+                    ✅ Live at <a href={deployUrl} target="_blank" rel="noreferrer" style={{ color: "var(--gold)", fontWeight: 700 }}>{deployUrl}</a>
+                  </div>
+                )}
+              </div>
+            )}
             <iframe data-testid="live-preview-iframe" title="preview" srcDoc={result.preview_html} sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-modals" style={{ width: "100%", height: 520, border: "none", background: "#fff" }} />
           </div>
           <div style={{ display: "flex", gap: ".6rem", marginTop: ".8rem" }}>
@@ -542,10 +605,13 @@ function BuildTab() {
 
 /* ------------------------------- Team ------------------------------- */
 function TeamTab() {
-  const { agents, progress, agentsCfg } = useBuilder();
+  const { agents, progress, agentsCfg, presets, savePreset, applyPreset, deletePreset } = useBuilder();
+  const [presetName, setPresetName] = useState("");
   const live = agents.length ? agents : agentsCfg.map((a) => ({ ...a, status: "queued" }));
   const working = live.filter((a) => a.status === "working").length;
   const done = live.filter((a) => a.status === "done").length;
+
+  const save = () => { savePreset(presetName.trim() || "My Crew"); setPresetName(""); };
 
   return (
     <div data-testid="agent-team-tab">
@@ -560,6 +626,26 @@ function TeamTab() {
           <div><div className="jv-hero" style={{ fontSize: "1.6rem" }}>{done}/{live.length}</div><div className="jv-muted jv-mono" style={{ fontSize: ".7rem" }}>COMPLETED</div></div>
         </div>
       </div>
+
+      {/* Save My Crew */}
+      <div className="jv-card" style={{ padding: ".9rem 1.1rem", marginBottom: "1rem" }} data-testid="crew-presets">
+        <div className="jv-mono jv-muted" style={{ fontSize: ".74rem", marginBottom: ".55rem" }}>💾 MERI PASANDIDA TEAM — save your model line-up & reuse it</div>
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+          <input data-testid="crew-preset-name" className="jv-input" placeholder="Name this crew (e.g. Fast & Cheap)" value={presetName} onChange={(e) => setPresetName(e.target.value)} style={{ flex: "1 1 220px" }} onKeyDown={(e) => e.key === "Enter" && save()} />
+          <button data-testid="crew-preset-save" className="jv-btn" onClick={save}><Save size={15} /> Save crew</button>
+        </div>
+        {presets.length > 0 && (
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: ".7rem" }}>
+            {presets.map((p) => (
+              <div key={p.id} className="jv-chip" style={{ display: "flex", alignItems: "center", gap: ".4rem", padding: ".3rem .5rem .3rem .75rem" }} data-testid={`crew-preset-${p.id}`}>
+                <button className="jv-mono" style={{ background: "none", border: "none", color: "var(--gold)", cursor: "pointer", fontWeight: 700 }} onClick={() => applyPreset(p)} title="Apply this crew">{p.name}</button>
+                <button style={{ background: "none", border: "none", color: "var(--red-2)", cursor: "pointer" }} onClick={() => deletePreset(p.id)} title="Delete"><Trash2 size={13} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <AgentPanel variant="grid" />
     </div>
   );
