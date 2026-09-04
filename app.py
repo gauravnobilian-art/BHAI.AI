@@ -434,6 +434,15 @@ def delete_research(rid: str) -> None:
     _write_json(path, [r for r in _read_json(path, []) if r["id"] != rid])
 
 
+def toggle_research_pin(rid: str) -> None:
+    path = os.path.join(_user_dir("research"), "reports.json")
+    reports = _read_json(path, [])
+    for r in reports:
+        if r["id"] == rid:
+            r["pinned"] = not r.get("pinned", False)
+    _write_json(path, reports)
+
+
 # ---- self-upgrade log + pending proposals + settings ----
 def load_upgrade_log() -> List[dict]:
     return _read_json(os.path.join(_user_dir("upgrades"), "log.json"), [])
@@ -453,11 +462,98 @@ def save_pending(items: List[dict]) -> None:
 
 def load_settings() -> dict:
     return _read_json(os.path.join(_user_dir("upgrades"), "settings.json"),
-                      {"auto_scan": False, "interval_hours": 24, "last_scan": ""})
+                      {"auto_scan": False, "interval_hours": 24, "last_scan": "",
+                       "digest_email": False, "smtp_host": "", "smtp_port": 587,
+                       "smtp_user": "", "digest_to": "", "last_digest": ""})
 
 
 def save_settings(settings: dict) -> None:
     _write_json(os.path.join(_user_dir("upgrades"), "settings.json"), settings)
+
+
+# ----------------------------------------------------------------------------- #
+#  Email digest  (SMTP, user-provided credentials)
+# ----------------------------------------------------------------------------- #
+
+def build_digest_text(proposals: List[dict]) -> str:
+    lines = [f"Jarvis weekly digest — {datetime.now(timezone.utc):%Y-%m-%d}",
+             f"{len(proposals)} upgrade proposal(s) awaiting your review:\n"]
+    for i, p in enumerate(proposals, 1):
+        lines.append(f"{i}. [{p.get('type','')}] {p.get('title','')}")
+        lines.append(f"   Why: {p.get('rationale','')}")
+    lines.append("\nOpen Jarvis to Approve or Deny each one.")
+    return "\n".join(lines)
+
+
+def send_digest_email(host: str, port: int, user: str, password: str,
+                      to_addr: str, body: str) -> tuple[bool, str]:
+    import smtplib
+    from email.mime.text import MIMEText
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = "🧬 Jarvis — Weekly Upgrade Digest"
+        msg["From"] = user
+        msg["To"] = to_addr
+        with smtplib.SMTP(host, int(port), timeout=30) as server:
+            server.starttls()
+            server.login(user, password)
+            server.sendmail(user, [to_addr], msg.as_string())
+        return True, "Sent"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+# ----------------------------------------------------------------------------- #
+#  Preview build  (apply approved upgrades to a safe copy)
+# ----------------------------------------------------------------------------- #
+
+def _app_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def build_preview_copy(approved: List[dict]) -> str:
+    """Create app_preview.py = current app + an appended, clearly-marked upgrades section."""
+    base_path = os.path.join(_app_dir(), "app.py")
+    with open(base_path, "r", encoding="utf-8") as fh:
+        base = fh.read()
+    header = ("\n\n# ===================================================================\n"
+              f"# JARVIS PREVIEW BUILD — {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}\n"
+              f"# {len(approved)} approved upgrade(s) staged below for review.\n"
+              "# Review, then run:  streamlit run app_preview.py\n"
+              "# ===================================================================\n")
+    blocks = []
+    for x in approved:
+        blocks.append(f"\n# --- {x.get('title','')} ({x.get('type','')}) ---\n"
+                      f"# note: {x.get('note','') or '-'}\n"
+                      f"# rationale: {x.get('rationale','')}\n"
+                      f"{x.get('code','')}\n")
+    preview = base + header + "\n".join(blocks)
+    out_path = os.path.join(_app_dir(), "app_preview.py")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(preview)
+    return out_path
+
+
+def promote_preview_to_live() -> tuple[bool, str]:
+    """Back up live app.py then replace it with the previewed copy."""
+    app_path = os.path.join(_app_dir(), "app.py")
+    preview_path = os.path.join(_app_dir(), "app_preview.py")
+    if not os.path.exists(preview_path):
+        return False, "Build a preview first."
+    bdir = _user_dir("backups")
+    backup = os.path.join(bdir, f"app_{int(time.time())}.py")
+    try:
+        with open(app_path, "r", encoding="utf-8") as fh:
+            live = fh.read()
+        with open(backup, "w", encoding="utf-8") as fh:
+            fh.write(live)
+        with open(preview_path, "r", encoding="utf-8") as fh:
+            preview = fh.read()
+        with open(app_path, "w", encoding="utf-8") as fh:
+            fh.write(preview)
+        return True, backup
+    except OSError as exc:
+        return False, str(exc)
 
 
 # ----------------------------------------------------------------------------- #
@@ -598,6 +694,8 @@ def render_sidebar() -> None:
         st.session_state["voice_lang"] = accents[accent]
         st.session_state["voice_rate"] = st.slider("Speaking speed", 0.5, 1.6, 1.02, 0.02,
                                                     key="voice_rate_slider")
+        if st.button("🔊 Test voice", use_container_width=True, key="voice-test"):
+            speak(f"Hello, I am Jarvis, speaking with a {accent} accent. This is my current speed.")
 
         st.divider()
         status = "🟢 Online" if st.session_state.get("llm_key") else "🔴 Add key"
@@ -877,16 +975,23 @@ def workspace_research() -> None:
             reports = [r for r in reports
                        if term in r["query"].lower() or term in r["summary"].lower()]
             st.caption(f"{len(reports)} match(es)")
+        reports = sorted(reports, key=lambda r: not r.get("pinned", False))
         for rep in reports:
-            with st.expander(f"🔎 {rep['query']}  ·  {rep['time'][:10]}"):
+            pin = "📌 " if rep.get("pinned") else ""
+            with st.expander(f"{pin}🔎 {rep['query']}  ·  {rep['time'][:10]}"):
                 st.markdown(rep["summary"])
-                cols = st.columns([1, 1])
+                cols = st.columns([1, 1, 1])
                 cols[0].download_button(
-                    "📄 Re-download PDF",
+                    "📄 PDF",
                     data=build_pdf(f"Research: {rep['query']}", rep["summary"], rep["sources"]),
                     file_name="jarvis-research.pdf", mime="application/pdf",
                     key=f"rehist-pdf-{rep['id']}", use_container_width=True)
-                if cols[1].button("🗑️ Delete", key=f"rehist-del-{rep['id']}",
+                pin_label = "📌 Unpin" if rep.get("pinned") else "📌 Pin"
+                if cols[1].button(pin_label, key=f"rehist-pin-{rep['id']}",
+                                  use_container_width=True):
+                    toggle_research_pin(rep["id"])
+                    st.rerun()
+                if cols[2].button("🗑️ Delete", key=f"rehist-del-{rep['id']}",
                                   use_container_width=True):
                     delete_research(rep["id"])
                     st.rerun()
@@ -1123,6 +1228,26 @@ def maybe_auto_scan() -> None:
     settings["last_scan"] = now.isoformat()
     save_settings(settings)
 
+    # optional weekly digest email (needs SMTP password held in this session)
+    pw = st.session_state.get("digest-pw", "")
+    if settings.get("digest_email") and pw and settings.get("smtp_user") and settings.get("digest_to"):
+        last_digest = settings.get("last_digest")
+        send_due = True
+        if last_digest:
+            try:
+                send_due = (now - datetime.fromisoformat(last_digest)).days >= 7
+            except ValueError:
+                send_due = True
+        pending = load_pending()
+        if send_due and pending:
+            ok, _ = send_digest_email(settings["smtp_host"], settings["smtp_port"],
+                                      settings["smtp_user"], pw, settings["digest_to"],
+                                      build_digest_text(pending))
+            if ok:
+                settings["last_digest"] = now.isoformat()
+                save_settings(settings)
+                st.toast("📧 Weekly upgrade digest emailed to you!", icon="📧")
+
 
 def workspace_upgrade() -> None:
     st.subheader("🛠️ Self-Upgrade Center")
@@ -1151,6 +1276,45 @@ def workspace_upgrade() -> None:
             st.caption(f"Last auto-scan: {settings['last_scan'][:16].replace('T',' ')} UTC")
         st.caption("Auto-scan runs quietly when you open the app after the interval elapses, "
                    "then notifies you here.")
+
+    with st.expander("📧 Weekly digest email", expanded=False):
+        st.caption("Have Jarvis email you a summary of new upgrade proposals (uses your SMTP, "
+                   "e.g. Gmail with an App Password). Password is kept only in this session.")
+        d_on = st.toggle("Email me a weekly digest", value=settings.get("digest_email", False),
+                         key="digest-toggle")
+        dc1, dc2 = st.columns(2)
+        host = dc1.text_input("SMTP host", value=settings.get("smtp_host", "smtp.gmail.com"),
+                              key="digest-host")
+        port = dc2.number_input("Port", value=int(settings.get("smtp_port", 587)),
+                                key="digest-port")
+        user = dc1.text_input("From email", value=settings.get("smtp_user", ""),
+                              key="digest-user", placeholder="you@gmail.com")
+        to_addr = dc2.text_input("Send to", value=settings.get("digest_to", ""),
+                                 key="digest-to", placeholder="you@gmail.com")
+        pw = st.text_input("SMTP password / app password", type="password", key="digest-pw")
+        if (d_on != settings.get("digest_email") or host != settings.get("smtp_host")
+                or int(port) != settings.get("smtp_port") or user != settings.get("smtp_user")
+                or to_addr != settings.get("digest_to")):
+            settings.update({"digest_email": d_on, "smtp_host": host, "smtp_port": int(port),
+                             "smtp_user": user, "digest_to": to_addr})
+            save_settings(settings)
+        if st.button("📧 Send digest now", key="digest-send"):
+            items = load_pending()
+            if not items:
+                st.info("No pending proposals to summarise yet.")
+            elif not (host and user and to_addr and pw):
+                st.warning("Fill SMTP host, from, to and password first.", icon="⚠️")
+            else:
+                ok, msg = send_digest_email(host, int(port), user, pw, to_addr,
+                                            build_digest_text(items))
+                if ok:
+                    settings["last_digest"] = datetime.now(timezone.utc).isoformat()
+                    save_settings(settings)
+                    st.success(f"Digest sent to {to_addr}!")
+                else:
+                    st.error(f"Send failed: {msg}")
+        if settings.get("last_digest"):
+            st.caption(f"Last digest sent: {settings['last_digest'][:16].replace('T',' ')} UTC")
 
     mode = st.radio("Mode", ["🔍 Scan for upgrades", "🩺 Self-heal (fix an error)"],
                     horizontal=True, key="upg-mode")
@@ -1234,6 +1398,29 @@ def workspace_upgrade() -> None:
             st.download_button("⬇️ Download approved upgrades patch", data=patch,
                                file_name="jarvis_upgrades.py", mime="text/x-python",
                                key="upg-patch")
+
+            # ---- Apply to a safe preview copy ----
+            st.markdown("##### 🧪 Apply to a safe preview")
+            st.caption("Stage all approved upgrades into `app_preview.py` — run and test it "
+                       "before promoting it to your live app.")
+            pc1, pc2 = st.columns(2)
+            if pc1.button("🧪 Build preview copy", key="upg-build-preview",
+                          use_container_width=True):
+                path = build_preview_copy(approved)
+                st.session_state["preview_built"] = True
+                st.success(f"Preview built → `{os.path.basename(path)}`. "
+                           "Test it with `streamlit run app_preview.py`.")
+            if st.session_state.get("preview_built"):
+                with st.popover("🚀 Promote preview to live", use_container_width=True):
+                    st.warning("This replaces your live `app.py` (a timestamped backup is saved "
+                               "first). The app will reload.", icon="⚠️")
+                    if st.checkbox("I've previewed it and want to go live", key="promote-confirm"):
+                        if st.button("Confirm promote", key="promote-go"):
+                            ok, info = promote_preview_to_live()
+                            if ok:
+                                st.success(f"Live app updated. Backup: `{os.path.basename(info)}`")
+                            else:
+                                st.error(info)
         for x in log:
             icon = "✅" if x["status"] == "approved" else "❌"
             with st.expander(f"{icon} {x.get('title','')}  ·  {x['time'][:10]}"):
